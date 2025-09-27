@@ -85,6 +85,42 @@ bool supabaseInsert(const char* table, const String& payloadJson) {
   return code >= 200 && code < 300;
 }
 
+bool supabaseTableExists(const char* table) {
+  String endpoint = String(SUPABASE_URL) + "/rest/v1/" + table + "?select=*&limit=1";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient https;
+  if (!https.begin(client, endpoint)) {
+    Serial.printf("Supabase table check: begin failed for %s\n", table);
+    return false;
+  }
+  https.addHeader("apikey", API_KEY);
+  https.addHeader("Accept", "application/json");
+  https.addHeader("Range-Unit", "items");
+  https.addHeader("Range", "0-0");
+
+  int code = https.GET();
+  if (code < 0) {
+    Serial.printf("Supabase table check: HTTP error for %s -> %s\n",
+                  table, https.errorToString(code).c_str());
+  } else {
+    Serial.printf("Supabase table check %s -> %d\n", table, code);
+  }
+  https.end();
+  return code >= 200 && code < 300;
+}
+
+void waitForSupabaseTable(const char* table) {
+  constexpr unsigned long RETRY_DELAY_MS = 15000;
+  while (!supabaseTableExists(table)) {
+    Serial.printf("Supabase table '%s' not ready. Waiting %lu ms before retry...\n",
+                  table, RETRY_DELAY_MS);
+    delay(RETRY_DELAY_MS);
+  }
+}
+
 bool postReadingRow(float tC, float h, float p_hPa) {
   String payload = String("{\"device_id\":\"") + DEVICE_ID +
                    "\",\"temperature_c\":" + String(tC, 2) +
@@ -269,6 +305,13 @@ void setup() {
   Serial.println("\nBooting...");
 
   connectWiFi();
+
+  Serial.println("Checking Supabase tables...");
+  waitForSupabaseTable(SUPABASE_TABLE);
+  if (String(SUPABASE_EVENTS_TABLE) != String(SUPABASE_TABLE)) {
+    waitForSupabaseTable(SUPABASE_EVENTS_TABLE);
+  }
+  Serial.println("Supabase tables ready.");
 
   // Build a session ID (mac + random) for correlating events
   uint64_t mac = ESP.getEfuseMac();
