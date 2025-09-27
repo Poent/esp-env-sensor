@@ -2,7 +2,9 @@
 
 This project runs on an ESP32 and periodically samples a Bosch BME280 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
 
-<img width="1268" height="1123" alt="2025-09-27_12h36_09" src="https://github.com/user-attachments/assets/9e2d0c88-9649-4143-b40b-8cad98015abc" />
+Grafana pointed at supabase database:
+
+<img width="1268" height="1123" alt="2025-09-27_12h36_09" src="https://github.com/user-attachments/assets/883bda60-dfb4-4abc-b0ba-9136d26e5e1b" />
 
 ## Hardware
 
