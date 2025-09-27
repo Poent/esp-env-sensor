@@ -13,9 +13,62 @@ resources provide the canonical setup guides for each component:
 
 - **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html)
   or the [CLI quick start](https://docs.platformio.org/en/stable/core/quickstart.html) to prepare your build and upload tools.
-- **Supabase:** Create a project and REST-enabled Postgres database using the [Supabase quickstart](https://supabase.com/docs/guides/getting-started/quickstarts).
+- **Supabase:** Create a project and REST-enabled Postgres database using the [Supabase quickstart](https://supabase.com/docs/guides/getting-started/quickstarts). After the project is provisioned, run the SQL in [Supabase Schema Setup](#supabase-schema-setup) to create the required tables and policies.
 - **Grafana:** Point Grafana at your Supabase database (or any compatible data source) by referencing the
   [Grafana data source documentation](https://grafana.com/docs/grafana/latest/datasources/) and relevant Postgres connection guide.
+
+## Supabase Schema Setup
+
+The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable anonymous inserts from the default `anon` key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
+
+```sql
+-- Enable required extensions (idempotent if already enabled)
+create extension if not exists "uuid-ossp";
+
+-- Environmental samples collected by the ESP32
+create table if not exists public.readings (
+  id uuid primary key default uuid_generate_v4(),
+  inserted_at timestamptz not null default timezone('utc', now()),
+  device_id text not null,
+  temperature_c double precision not null,
+  humidity_rh double precision not null,
+  pressure_hpa double precision not null
+);
+
+-- Operational events for observability and recovery telemetry
+create table if not exists public.device_events (
+  id uuid primary key default uuid_generate_v4(),
+  created_at timestamptz not null default timezone('utc', now()),
+  device_id text not null,
+  session_id text,
+  event_type text not null,
+  severity text not null,
+  message text,
+  reading_temp_c double precision,
+  reading_humidity_rh double precision,
+  reading_pressure_hpa double precision,
+  action text,
+  attempt integer,
+  action_success boolean not null default false,
+  meta jsonb
+);
+
+-- Optional helper indexes for Grafana dashboards
+create index if not exists readings_device_time_idx on public.readings (device_id, inserted_at);
+create index if not exists device_events_device_time_idx on public.device_events (device_id, created_at);
+
+-- Row Level Security and policies so the device can insert using the anon key
+alter table public.readings enable row level security;
+alter table public.device_events enable row level security;
+
+create policy if not exists "allow anon inserts" on public.readings
+  for insert with check (auth.role() = 'anon');
+
+create policy if not exists "allow anon inserts" on public.device_events
+  for insert with check (auth.role() = 'anon');
+```
+
+> ℹ️ When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
 
 ## Hardware
 
