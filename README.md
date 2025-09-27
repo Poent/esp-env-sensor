@@ -6,6 +6,17 @@ Grafana pointed at supabase database:
 
 <img width="1268" height="1123" alt="2025-09-27_12h36_09" src="https://github.com/user-attachments/assets/883bda60-dfb4-4abc-b0ba-9136d26e5e1b" />
 
+## Setup Overview
+
+Getting started requires configuring the development environment, backend storage, and visualization stack. The following
+resources provide the canonical setup guides for each component:
+
+- **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html)
+  or the [CLI quick start](https://docs.platformio.org/en/stable/core/quickstart.html) to prepare your build and upload tools.
+- **Supabase:** Create a project and REST-enabled Postgres database using the [Supabase quickstart](https://supabase.com/docs/guides/getting-started/quickstarts).
+- **Grafana:** Point Grafana at your Supabase database (or any compatible data source) by referencing the
+  [Grafana data source documentation](https://grafana.com/docs/grafana/latest/datasources/) and relevant Postgres connection guide.
+
 ## Hardware
 
 - **MCU:** ESP32 development board (tested with the `esp32dev` PlatformIO target).
