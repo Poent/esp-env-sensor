@@ -4,7 +4,7 @@
 #define WIFI_SSID            "your-ssid"
 #define WIFI_PASS            "your-wifi-password"
 #define SUPABASE_URL         "https://your-project-id.supabase.co"
-#define SUPABASE_ANON_KEY    "your-anon-key"
+#define SUPABASE_API_KEY     "your-project-api-key"   // Project Settings → API → Project API keys
 #define SUPABASE_TABLE       "readings"
 #define DEVICE_ID            "esp32-env-node-01"
 

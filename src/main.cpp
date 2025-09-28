@@ -7,6 +7,14 @@
 #include <Adafruit_BME280.h>
 #include "secrets.h"
 
+#ifdef SUPABASE_ANON_KEY
+  #error "SUPABASE_ANON_KEY has been replaced by SUPABASE_API_KEY. Update include/secrets.h to use SUPABASE_API_KEY."
+#endif
+
+#ifndef SUPABASE_API_KEY
+  #error "SUPABASE_API_KEY must be defined in include/secrets.h"
+#endif
+
 // ========= Config =========
 #ifndef SUPABASE_EVENTS_TABLE
   #define SUPABASE_EVENTS_TABLE "device_events"
@@ -75,8 +83,11 @@ bool supabaseInsert(const char* table, const String& payloadJson) {
     return false;
   }
   https.addHeader("Content-Type", "application/json");
-  https.addHeader("apikey", API_KEY);
   https.addHeader("Prefer", "return=minimal");
+
+  String authHeader = String("Bearer ") + SUPABASE_API_KEY;
+  https.addHeader("apikey", SUPABASE_API_KEY);
+  https.addHeader("Authorization", authHeader);
 
   int code = https.POST(payloadJson);
   Serial.printf("POST %s -> %d\n", endpoint.c_str(), code);
@@ -96,10 +107,13 @@ bool supabaseTableExists(const char* table) {
     Serial.printf("Supabase table check: begin failed for %s\n", table);
     return false;
   }
-  https.addHeader("apikey", API_KEY);
   https.addHeader("Accept", "application/json");
   https.addHeader("Range-Unit", "items");
   https.addHeader("Range", "0-0");
+
+  String authHeader = String("Bearer ") + SUPABASE_API_KEY;
+  https.addHeader("apikey", SUPABASE_API_KEY);
+  https.addHeader("Authorization", authHeader);
 
   int code = https.GET();
   if (code < 0) {
