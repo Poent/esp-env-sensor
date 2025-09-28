@@ -1,6 +1,6 @@
 # ESP32 Environmental Sensor
 
-This project runs on an ESP32 and periodically samples a Bosch BME280 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
+This project is a proof of concept for logging environmental data to Supabase and then graphing that historical data using Grafana. It runs on an ESP32 and periodically samples a Bosch BME280 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
 
 
 
