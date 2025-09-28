@@ -31,6 +31,9 @@ resources provide the canonical setup guides for each component:
 The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable anonymous inserts from the default `anon` key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
 
 ```sql
+-- Enables gen_random_uuid() for the device_events primary key.
+create extension if not exists "pgcrypto";
+
 create table public.readings (
   id bigint generated always as identity not null,
   device_id text not null,
@@ -39,7 +42,7 @@ create table public.readings (
   humidity_rh double precision not null,
   pressure_hpa double precision not null,
   constraint readings_pkey primary key (id)
-) TABLESPACE pg_default;
+);
 
 create table public.device_events (
   id uuid not null default gen_random_uuid (),
@@ -64,7 +67,7 @@ create table public.device_events (
       )
     )
   )
-) TABLESPACE pg_default;
+);
 
 ```
 
