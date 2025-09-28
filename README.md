@@ -2,16 +2,25 @@
 
 This project runs on an ESP32 and periodically samples a Bosch BME280 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
 
+
+
+
 Grafana pointed at supabase database:
 
 <img width="1268" height="1123" alt="2025-09-27_12h36_09" src="https://github.com/user-attachments/assets/883bda60-dfb4-4abc-b0ba-9136d26e5e1b" />
 
 ## Setup Overview
 
+### Hardware Setup
+
+The hardware is very simple and consists only of two parts. The ESP32-WROOM-32, and a BME280. Almost any ESP32 can be configured to support this, and the BME280 does not need to be any particular brand or make (I got both off amazon). 
+
+<img width="885" height="516" alt="2025-09-27_18h00_38" src="https://github.com/user-attachments/assets/2b477d58-fbf3-41f0-8232-650ef7979f20" />
+
 Getting started requires configuring the development environment, backend storage, and visualization stack. The following
 resources provide the canonical setup guides for each component:
 
-- **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html)
+- **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html) for setup with VSCode
   or the [CLI quick start](https://docs.platformio.org/en/stable/core/quickstart.html) to prepare your build and upload tools.
 - **Supabase:** Create a project and REST-enabled Postgres database using the [Supabase quickstart](https://supabase.com/docs/guides/getting-started/quickstarts). After the project is provisioned, run the SQL in [Supabase Schema Setup](#supabase-schema-setup) to create the required tables and policies.
 - **Grafana:** Point Grafana at your Supabase database (or any compatible data source) by referencing the
@@ -22,50 +31,41 @@ resources provide the canonical setup guides for each component:
 The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable anonymous inserts from the default `anon` key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
 
 ```sql
--- Enable required extensions (idempotent if already enabled)
-create extension if not exists "uuid-ossp";
-
--- Environmental samples collected by the ESP32
-create table if not exists public.readings (
-  id uuid primary key default uuid_generate_v4(),
-  inserted_at timestamptz not null default timezone('utc', now()),
+create table public.readings (
+  id bigint generated always as identity not null,
   device_id text not null,
+  recorded_at timestamp with time zone not null default now(),
   temperature_c double precision not null,
   humidity_rh double precision not null,
-  pressure_hpa double precision not null
-);
+  pressure_hpa double precision not null,
+  constraint readings_pkey primary key (id)
+) TABLESPACE pg_default;
 
--- Operational events for observability and recovery telemetry
-create table if not exists public.device_events (
-  id uuid primary key default uuid_generate_v4(),
-  created_at timestamptz not null default timezone('utc', now()),
+create table public.device_events (
+  id uuid not null default gen_random_uuid (),
+  created_at timestamp with time zone not null default now(),
   device_id text not null,
-  session_id text,
+  session_id text null,
   event_type text not null,
   severity text not null,
-  message text,
-  reading_temp_c double precision,
-  reading_humidity_rh double precision,
-  reading_pressure_hpa double precision,
-  action text,
-  attempt integer,
-  action_success boolean not null default false,
-  meta jsonb
-);
+  message text null,
+  reading_temp_c numeric null,
+  reading_humidity_rh numeric null,
+  reading_pressure_hpa numeric null,
+  action text null,
+  attempt smallint null,
+  action_success boolean null,
+  meta jsonb null,
+  constraint device_events_pkey primary key (id),
+  constraint device_events_severity_check check (
+    (
+      severity = any (
+        array['info'::text, 'warning'::text, 'error'::text]
+      )
+    )
+  )
+) TABLESPACE pg_default;
 
--- Optional helper indexes for Grafana dashboards
-create index if not exists readings_device_time_idx on public.readings (device_id, inserted_at);
-create index if not exists device_events_device_time_idx on public.device_events (device_id, created_at);
-
--- Row Level Security and policies so the device can insert using the anon key
-alter table public.readings enable row level security;
-alter table public.device_events enable row level security;
-
-create policy if not exists "allow anon inserts" on public.readings
-  for insert with check (auth.role() = 'anon');
-
-create policy if not exists "allow anon inserts" on public.device_events
-  for insert with check (auth.role() = 'anon');
 ```
 
 > ℹ️ When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
