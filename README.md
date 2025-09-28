@@ -28,7 +28,7 @@ resources provide the canonical setup guides for each component:
 
 ## Supabase Schema Setup
 
-The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable anonymous inserts from the default `anon` key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
+The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable inserts using your project's public API key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
 
 ```sql
 -- Enables gen_random_uuid() for the device_events primary key.
@@ -94,7 +94,9 @@ Copy the example secrets header into place and fill in your credentials before b
 cp include/secrets.example.h include/secrets.h
 ```
 
-Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, anon key, preferred readings table, and device identifier. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
+Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Supabase API key, preferred readings table, and device identifier. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
+
+> 💡 Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
 
 > ⚠️ `include/secrets.h` is ignored by Git; keep your credentials private.
 
@@ -129,7 +131,7 @@ GOOD: T=24.48°C RH=39.1% P=828.8 hPa
 ```
 
 - **Cadence:** The loop publishes fresh readings once per minute. Implausible data triggers up to three retries before the firmware attempts sensor recovery.
-- **Supabase endpoints:** Readings are POSTed to `https://<your-project>.supabase.co/rest/v1/<table>` using the anon key for authentication. Events follow the same pattern, defaulting to the `device_events` table unless overridden.
+- **Supabase endpoints:** Readings are POSTed to `https://<your-project>.supabase.co/rest/v1/<table>` using your Supabase project's API key for authentication. Events follow the same pattern, defaulting to the `device_events` table unless overridden.
 - **Session correlation:** Each boot generates a unique session ID combining the ESP32 MAC address and a random value to correlate events in Supabase.
 
 ## Testing and Troubleshooting
@@ -137,7 +139,7 @@ GOOD: T=24.48°C RH=39.1% P=828.8 hPa
 - Use `pio device monitor` to inspect serial output. Successful uploads print `GOOD` lines with sensor values and HTTP status codes for Supabase requests.
 - Seeing repeated "BME280 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA/SCL connections, and that you are using a BME280 (not BMP280).
 - If Wi-Fi fails to connect, double-check your SSID/password in `include/secrets.h` and ensure the network allows the ESP32 MAC address.
-- Supabase errors (HTTP codes outside 200–299) often mean the anon key or table names are incorrect. Confirm your REST endpoint and permissions.
+- Supabase errors (HTTP codes outside 200–299) often mean the API key or table names are incorrect. Confirm your REST endpoint and permissions.
 
 ## Contributing
 
