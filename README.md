@@ -26,7 +26,7 @@ Getting started requires configuring the development environment, backend storag
 - **Grafana:** Point Grafana at your Supabase database (or any compatible data source) by referencing the
   [Grafana data source documentation](https://grafana.com/docs/grafana/latest/datasources/) and relevant Postgres connection guide.
 
-## Supabase Schema Setup
+### Supabase Schema Setup
 
 The firmware for the ESP32 sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. Once your Supabase account, project, and database are setup you can create both tables (and enable inserts using your project's public API key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
 
@@ -72,7 +72,7 @@ create table public.device_events (
 ```
 > When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
 
-## Grafana Setup
+### Grafana Setup
 
 [TODO] -> grafana dashboard configuration is included under "grafana\ESP32 Sensors-dashboard.json". Setting up grafana, connecting it to Supabase, and loading the dashboard layout is not currently described in the project. 
 
