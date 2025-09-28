@@ -16,8 +16,9 @@ The hardware is very simple and consists only of two parts. The ESP32-WROOM-32, 
 
 <img width="885" height="516" alt="2025-09-27_18h00_38" src="https://github.com/user-attachments/assets/2b477d58-fbf3-41f0-8232-650ef7979f20" />
 
-Getting started requires configuring the development environment, backend storage, and visualization stack. The following
-resources provide the canonical setup guides for each component:
+### Software setup
+
+Getting started requires configuring the development environment, backend storage, and visualization stack. Start by cloning this repository to a local folder and then opening the folder in VSCode. Ensure that the platformIO extension is installed, and then proceed to setting up Supabase and Grafana free instances. Setting up Supabase and Grafana is outside the scope of this project, but the following resources provide the canonical setup guides for each component:
 
 - **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html) for setup with VSCode
   or the [CLI quick start](https://docs.platformio.org/en/stable/core/quickstart.html) to prepare your build and upload tools.
@@ -27,7 +28,7 @@ resources provide the canonical setup guides for each component:
 
 ## Supabase Schema Setup
 
-The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. You can create both tables (and enable inserts using your project's public API key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
+The firmware for the ESP32 sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. Once your Supabase account, project, and database are setup you can create both tables (and enable inserts using your project's public API key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
 
 ```sql
 -- Enables gen_random_uuid() for the device_events primary key.
@@ -69,8 +70,11 @@ create table public.device_events (
 );
 
 ```
-
 > When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
+
+## Grafana Setup
+
+[TODO] -> grafana dashboard configuration is included under "grafana\ESP32 Sensors-dashboard.json". Setting up grafana, connecting it to Supabase, and loading the dashboard layout is not currently described in the project. 
 
 ## Hardware
 
