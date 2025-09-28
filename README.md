@@ -4,8 +4,7 @@ This project is a proof of concept for logging environmental data to Supabase an
 
 
 
-
-Grafana pointed at supabase database:
+## Final Dashboard on Grafana
 
 <img width="1268" height="1123" alt="2025-09-27_12h36_09" src="https://github.com/user-attachments/assets/883bda60-dfb4-4abc-b0ba-9136d26e5e1b" />
 
@@ -13,7 +12,7 @@ Grafana pointed at supabase database:
 
 ### Hardware Setup
 
-The hardware is very simple and consists only of two parts. The ESP32-WROOM-32, and a BME280. Almost any ESP32 can be configured to support this, and the BME280 does not need to be any particular brand or make (I got both off amazon). 
+The hardware is very simple and consists only of two parts. The ESP32-WROOM-32, and a BME280. In this example ESP pins 21/22 map to SDA/SCL on the BME280. Almost any ESP32 can be configured to support this and pins can be changed within reason (dependant on ESP), and the BME280 does not need to be any particular brand or make (I got both off amazon). 
 
 <img width="885" height="516" alt="2025-09-27_18h00_38" src="https://github.com/user-attachments/assets/2b477d58-fbf3-41f0-8232-650ef7979f20" />
 
