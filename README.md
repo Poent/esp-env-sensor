@@ -23,13 +23,13 @@ The firmware sends environmental samples to a `readings` table and operational t
 
 ```sql
 -- Enable required extensions (idempotent if already enabled)
-create extension if not exists "uuid-ossp";
+create extension if not exists pgcrypto;
 
 -- Environmental samples collected by the ESP32
 create table if not exists public.readings (
-  id uuid primary key default uuid_generate_v4(),
-  inserted_at timestamptz not null default timezone('utc', now()),
+  id bigint generated always as identity primary key,
   device_id text not null,
+  recorded_at timestamptz not null default now(),
   temperature_c double precision not null,
   humidity_rh double precision not null,
   pressure_hpa double precision not null
@@ -37,24 +37,27 @@ create table if not exists public.readings (
 
 -- Operational events for observability and recovery telemetry
 create table if not exists public.device_events (
-  id uuid primary key default uuid_generate_v4(),
-  created_at timestamptz not null default timezone('utc', now()),
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
   device_id text not null,
   session_id text,
   event_type text not null,
   severity text not null,
   message text,
-  reading_temp_c double precision,
-  reading_humidity_rh double precision,
-  reading_pressure_hpa double precision,
+  reading_temp_c numeric,
+  reading_humidity_rh numeric,
+  reading_pressure_hpa numeric,
   action text,
-  attempt integer,
-  action_success boolean not null default false,
-  meta jsonb
+  attempt smallint,
+  action_success boolean,
+  meta jsonb,
+  constraint device_events_severity_check check (
+    severity = any (array['info', 'warning', 'error'])
+  )
 );
 
 -- Optional helper indexes for Grafana dashboards
-create index if not exists readings_device_time_idx on public.readings (device_id, inserted_at);
+create index if not exists readings_device_time_idx on public.readings (device_id, recorded_at);
 create index if not exists device_events_device_time_idx on public.device_events (device_id, created_at);
 
 -- Row Level Security and policies so the device can insert using the anon key
