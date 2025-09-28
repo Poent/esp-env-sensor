@@ -71,7 +71,7 @@ create table public.device_events (
 
 ```
 
-> ℹ️ When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
+> When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
 
 ## Hardware
 
@@ -96,9 +96,9 @@ cp include/secrets.example.h include/secrets.h
 
 Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Supabase API key, preferred readings table, and device identifier. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
 
-> 💡 Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
+> Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
 
-> ⚠️ `include/secrets.h` is ignored by Git; keep your credentials private.
+> `include/secrets.h` is ignored by Git; keep your credentials private.
 
 ## Building and Uploading with PlatformIO
 
