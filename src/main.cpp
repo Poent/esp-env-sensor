@@ -26,6 +26,8 @@ Adafruit_BME280 bme;                   // I2C
 constexpr unsigned long SEND_EVERY_MS = 60000; // 1 minute
 unsigned long lastSend = 0;
 
+bool gLastI2cClearRequired = false;
+
 
 // Data model
 struct SensorReadings {
@@ -199,11 +201,61 @@ bool bmeSoftReset() {
   return wrote;
 }
 
+bool i2cClearBus() {
+  constexpr int SDA_PIN = 21;
+  constexpr int SCL_PIN = 22;
+
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, INPUT_PULLUP);
+  delayMicroseconds(5);
+  gLastI2cClearRequired = (digitalRead(SDA_PIN) == LOW) || (digitalRead(SCL_PIN) == LOW);
+
+  pinMode(SDA_PIN, OUTPUT_OPEN_DRAIN);
+  pinMode(SCL_PIN, OUTPUT_OPEN_DRAIN);
+  digitalWrite(SDA_PIN, HIGH);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+
+  if (!gLastI2cClearRequired && digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH) {
+    pinMode(SDA_PIN, INPUT_PULLUP);
+    pinMode(SCL_PIN, INPUT_PULLUP);
+    return true;
+  }
+
+  for (int i = 0; i < 9; ++i) {
+    digitalWrite(SCL_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(SCL_PIN, HIGH);
+    delayMicroseconds(5);
+  }
+
+  digitalWrite(SDA_PIN, LOW);
+  delayMicroseconds(5);
+  digitalWrite(SCL_PIN, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(SDA_PIN, HIGH);
+  delayMicroseconds(5);
+
+  bool clear = (digitalRead(SDA_PIN) == HIGH);
+
+  pinMode(SDA_PIN, INPUT_PULLUP);
+  pinMode(SCL_PIN, INPUT_PULLUP);
+
+  return clear;
+}
+
 bool bmeReinit() {
   #if !defined(ARDUINO_ARCH_AVR)
   Wire.end();
   #endif
   delay(2);
+  if (!i2cClearBus()) {
+    Serial.println("I2C bus clear failed");
+    return false;
+  }
+  if (gLastI2cClearRequired) {
+    postEvent("i2c_bus_clear", "warning", "cleared I2C bus before reinit");
+  }
   Wire.begin(21, 22);
   Wire.setClock(100000);
   Wire.setTimeOut(25);
