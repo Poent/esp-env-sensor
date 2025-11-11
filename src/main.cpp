@@ -37,6 +37,15 @@ struct SensorReadings {
 };
 SensorReadings lastGood = {NAN, NAN, NAN};
 
+// Error state tracking for webhook alerts
+bool gInErrorState = false;
+unsigned long gLastWebhookSent = 0;
+constexpr unsigned long WEBHOOK_COOLDOWN_MS = 1000; // 5 minutes minimum between webhooks
+
+// ========= Debug mode =========
+// Set to true to send test webhooks at startup, false for normal operation
+constexpr bool DEBUG_WEBHOOKS = true;
+
 // Session correlation for logs
 String gSessionId;
 
@@ -177,6 +186,100 @@ bool postEvent(const char* event_type,
   return ok;
 }
 
+bool sendWebhook(const char* alert_type, 
+                 const String& message, 
+                 const char* severity = "info",
+                 const SensorReadings* readings = nullptr,
+                 const char* extra_data = nullptr) {
+  // Cooldown check to prevent spam (except for info/success messages)
+  unsigned long now = millis();
+  bool isError = (strcmp(severity, "error") == 0 || strcmp(severity, "warning") == 0);
+  if (isError && (now - gLastWebhookSent < WEBHOOK_COOLDOWN_MS)) {
+    Serial.printf("Webhook: skipping (cooldown active, %lu ms remaining)\n", 
+                  WEBHOOK_COOLDOWN_MS - (now - gLastWebhookSent));
+    return false;
+  }
+
+  String payload = "{";
+  payload += "\"device_id\":\"" + String(DEVICE_ID) + "\"";
+  payload += ",\"alert_type\":\"" + String(alert_type) + "\"";
+  payload += ",\"severity\":\"" + String(severity) + "\"";
+  payload += ",\"message\":\"" + jsonEscape(message) + "\"";
+  payload += ",\"timestamp\":" + String(millis());
+  payload += ",\"fw_version\":\"" + String(FW_VERSION) + "\"";
+  
+  // Add sensor readings if provided
+  if (readings && !isnan(readings->temperature)) {
+    payload += ",\"readings\":{";
+    payload += "\"temperature_c\":" + String(readings->temperature, 2);
+    payload += ",\"humidity_rh\":" + String(readings->humidity, 2);
+    payload += ",\"pressure_hpa\":" + String(readings->pressure, 2);
+    payload += "}";
+  }
+  
+  // Add extra data if provided
+  if (extra_data && extra_data[0]) {
+    payload += ",\"extra\":" + String(extra_data);
+  }
+  
+  payload += "}";
+
+  WiFiClient client;
+  HTTPClient http;
+  
+  if (!http.begin(client, N8N_WEBHOOK_URL)) {
+    Serial.println("Webhook: HTTP begin failed");
+    return false;
+  }
+  
+  http.addHeader("Content-Type", "application/json");
+  int code = http.POST(payload);
+  
+  Serial.printf("Webhook POST [%s/%s] -> %d\n", alert_type, severity, code);
+  if (code < 0) {
+    Serial.printf("Webhook error: %s\n", http.errorToString(code).c_str());
+  }
+  
+  http.end();
+  
+  bool ok = (code >= 200 && code < 300);
+  if (ok) {
+    gLastWebhookSent = now;
+  }
+  return ok;
+}
+
+void testWebhooks() {
+  Serial.println("\n=== WEBHOOK DEBUG MODE ACTIVE ===");
+  Serial.println("Sending test webhooks (one of each type)...");
+  
+  // Create some sample readings for testing
+  SensorReadings testReadings = {23.5, 45.0, 1013.25};
+  String testExtra = "{\"test_mode\":true,\"ip_address\":\"" + WiFi.localIP().toString() + "\"}";
+  
+  // Test 1: Info - Device Startup
+  Serial.println("\n[1/4] Sending INFO webhook (device_startup)...");
+  sendWebhook("device_startup", "TEST: Device startup message", "info", &testReadings, testExtra.c_str());
+  delay(10000);
+  
+  // Test 2: Warning - Sensor Error
+  Serial.println("\n[2/4] Sending WARNING webhook (sensor_error)...");
+  sendWebhook("sensor_error", "TEST: Sensor error warning", "warning", &testReadings);
+  delay(10000);
+  
+  // Test 3: Error - Recovery Failed
+  Serial.println("\n[3/4] Sending ERROR webhook (recovery_failed)...");
+  sendWebhook("recovery_failed", "TEST: Recovery failed error", "error");
+  delay(10000);
+  
+  // Test 4: Info - Recovery Success
+  Serial.println("\n[4/4] Sending INFO webhook (sensor_recovered)...");
+  sendWebhook("sensor_recovered", "TEST: Sensor recovered successfully", "info", &testReadings);
+  
+  Serial.println("\n=== WEBHOOK DEBUG MODE COMPLETE ===");
+  Serial.println("Set DEBUG_WEBHOOKS = false to disable test mode\n");
+}
+
 // ================= BME robustness =================
 void bmeConfigure() {
   Wire.setClock(100000);     // 100 kHz for robustness
@@ -308,6 +411,12 @@ bool tryTakePlausibleReading(SensorReadings& reading, const SensorReadings* last
 bool attemptRecoverySequence(SensorReadings& reading, const SensorReadings* last) {
   Serial.println("Reading implausible -> recovery sequence…");
 
+  // Send webhook alert when entering error state (only once)
+  if (!gInErrorState) {
+    gInErrorState = true;
+    sendWebhook("sensor_error", "Device entering error state - attempting recovery", "error", &reading);
+  }
+
   postEvent("soft_reset", "warning", "attempting BME soft reset");
   bool softOk = bmeSoftReset();
   postEvent("soft_reset_result", softOk ? "info" : "error",
@@ -333,10 +442,17 @@ bool attemptRecoverySequence(SensorReadings& reading, const SensorReadings* last
 
   if (reinitOk && takeReading(reading) && plausible(reading, last)) {
     postEvent("recovery_ok", "info", "reading ok after recovery", &reading, nullptr, 0, true);
+    // Send recovery success webhook
+    if (gInErrorState) {
+      gInErrorState = false;
+      sendWebhook("sensor_recovered", "Device successfully recovered from error state", "info", &reading);
+    }
     return true;
   }
 
   postEvent("recovery_failed", "error", "dropping bad reading after recovery", nullptr, nullptr, 0, false);
+  // Send recovery failure webhook (respects cooldown)
+  sendWebhook("recovery_failed", "Device failed to recover - dropping reading", "error");
   return false;
 }
 
@@ -400,9 +516,29 @@ void setup() {
     lastGood = r;
     Serial.printf("GOOD: T=%.2f°C RH=%.1f%% P=%.1f hPa\n", r.temperature, r.humidity, r.pressure);
     postReadings(r);
+    
+    // Send startup webhook with boot info and first reading
+    String bootInfo = String("{\"ip_address\":\"") + WiFi.localIP().toString() + 
+                      "\",\"mac_address\":\"" + WiFi.macAddress() + 
+                      "\",\"session_id\":\"" + gSessionId + 
+                      "\",\"rssi_dbm\":" + String(WiFi.RSSI()) + "}";
+    sendWebhook("device_startup", "Device booted successfully", "info", &r, bootInfo.c_str());
   } else {
     Serial.println("Initial reading implausible, will try again in loop.");
     postEvent("implausible_reading", "warning", "initial reading failed plausibility", &r);
+    
+    // Send startup webhook even if first reading failed
+    String bootInfo = String("{\"ip_address\":\"") + WiFi.localIP().toString() + 
+                      "\",\"mac_address\":\"" + WiFi.macAddress() + 
+                      "\",\"session_id\":\"" + gSessionId + 
+                      "\",\"rssi_dbm\":" + String(WiFi.RSSI()) + 
+                      "\",\"first_reading_failed\":true}";
+    sendWebhook("device_startup", "Device booted but first reading failed", "warning", nullptr, bootInfo.c_str());
+  }
+  
+  // Debug mode: test all webhook types
+  if (DEBUG_WEBHOOKS) {
+    testWebhooks();
   }
 }
 
@@ -431,6 +567,11 @@ void loop() {
       lastGood = r;
       Serial.printf("GOOD: T=%.2f°C RH=%.1f%% P=%.1f hPa\n", r.temperature, r.humidity, r.pressure);
       postReadings(r);
+      // Clear error state if we got a good reading without recovery
+      if (gInErrorState) {
+        gInErrorState = false;
+        sendWebhook("sensor_recovered", "Device recovered - normal operation resumed", "info", &r);
+      }
     } else {
       Serial.println("Dropping bad reading after recovery attempts.");
     }
