@@ -26,6 +26,17 @@ Adafruit_BME280 bme;                   // I2C
 constexpr unsigned long SEND_EVERY_MS = 60000; // 1 minute
 unsigned long lastSend = 0;
 
+// ========= XIAO ESP32-S3 I2C pins =========
+// Seeed XIAO ESP32-S3: D9 = GPIO8, D10 = GPIO9
+// We prefer the board pin macros (D9/D10) when available.
+#if defined(D9) && defined(D10)
+constexpr int I2C_SDA_PIN = D9;
+constexpr int I2C_SCL_PIN = D10;
+#else
+constexpr int I2C_SDA_PIN = 8;
+constexpr int I2C_SCL_PIN = 9;
+#endif
+
 bool gLastI2cClearRequired = false;
 
 
@@ -305,44 +316,41 @@ bool bmeSoftReset() {
 }
 
 bool i2cClearBus() {
-  constexpr int SDA_PIN = 21;
-  constexpr int SCL_PIN = 22;
-
-  pinMode(SDA_PIN, INPUT_PULLUP);
-  pinMode(SCL_PIN, INPUT_PULLUP);
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
   delayMicroseconds(5);
-  gLastI2cClearRequired = (digitalRead(SDA_PIN) == LOW) || (digitalRead(SCL_PIN) == LOW);
+  gLastI2cClearRequired = (digitalRead(I2C_SDA_PIN) == LOW) || (digitalRead(I2C_SCL_PIN) == LOW);
 
-  pinMode(SDA_PIN, OUTPUT_OPEN_DRAIN);
-  pinMode(SCL_PIN, OUTPUT_OPEN_DRAIN);
-  digitalWrite(SDA_PIN, HIGH);
-  digitalWrite(SCL_PIN, HIGH);
+  pinMode(I2C_SDA_PIN, OUTPUT_OPEN_DRAIN);
+  pinMode(I2C_SCL_PIN, OUTPUT_OPEN_DRAIN);
+  digitalWrite(I2C_SDA_PIN, HIGH);
+  digitalWrite(I2C_SCL_PIN, HIGH);
   delayMicroseconds(5);
 
-  if (!gLastI2cClearRequired && digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH) {
-    pinMode(SDA_PIN, INPUT_PULLUP);
-    pinMode(SCL_PIN, INPUT_PULLUP);
+  if (!gLastI2cClearRequired && digitalRead(I2C_SDA_PIN) == HIGH && digitalRead(I2C_SCL_PIN) == HIGH) {
+    pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+    pinMode(I2C_SCL_PIN, INPUT_PULLUP);
     return true;
   }
 
   for (int i = 0; i < 9; ++i) {
-    digitalWrite(SCL_PIN, LOW);
+    digitalWrite(I2C_SCL_PIN, LOW);
     delayMicroseconds(5);
-    digitalWrite(SCL_PIN, HIGH);
+    digitalWrite(I2C_SCL_PIN, HIGH);
     delayMicroseconds(5);
   }
 
-  digitalWrite(SDA_PIN, LOW);
+  digitalWrite(I2C_SDA_PIN, LOW);
   delayMicroseconds(5);
-  digitalWrite(SCL_PIN, HIGH);
+  digitalWrite(I2C_SCL_PIN, HIGH);
   delayMicroseconds(5);
-  digitalWrite(SDA_PIN, HIGH);
+  digitalWrite(I2C_SDA_PIN, HIGH);
   delayMicroseconds(5);
 
-  bool clear = (digitalRead(SDA_PIN) == HIGH);
+  bool clear = (digitalRead(I2C_SDA_PIN) == HIGH);
 
-  pinMode(SDA_PIN, INPUT_PULLUP);
-  pinMode(SCL_PIN, INPUT_PULLUP);
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
 
   return clear;
 }
@@ -359,7 +367,7 @@ bool bmeReinit() {
   if (gLastI2cClearRequired) {
     postEvent("i2c_bus_clear", "warning", "cleared I2C bus before reinit");
   }
-  Wire.begin(21, 22);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(100000);
   Wire.setTimeOut(25);
   bool ok = bme.begin(0x76) || bme.begin(0x77);
@@ -467,7 +475,7 @@ void postReadings(const SensorReadings& readings) {
 }
 
 bool initBME() {
-  Wire.begin(21, 22);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(100000);
   Wire.setTimeOut(25);
   bool ok = (bme.begin(0x76) || bme.begin(0x77));

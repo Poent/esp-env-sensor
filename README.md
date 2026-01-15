@@ -12,7 +12,7 @@ This project is a proof of concept for logging environmental data to Supabase an
 
 ### Hardware Setup
 
-The hardware is very simple and consists only of two parts. The ESP32-WROOM-32, and a BME280. In this example ESP pins 21/22 map to SDA/SCL on the BME280. Almost any ESP32 can be configured to support this and pins can be changed within reason (dependant on ESP), and the BME280 does not need to be any particular brand or make (I got both off amazon). 
+The hardware is very simple and consists only of two parts: a Seeed Studio XIAO ESP32-S3 and a BME280. In this example the XIAO uses pins D9/D10 for I²C (SDA/SCL) to the BME280 (D9 = GPIO8, D10 = GPIO9). 
 
 <img width="885" height="516" alt="2025-09-27_18h00_38" src="https://github.com/user-attachments/assets/2b477d58-fbf3-41f0-8232-650ef7979f20" />
 
@@ -78,8 +78,8 @@ create table public.device_events (
 
 ## Hardware
 
-- **MCU:** ESP32 development board (tested with the `esp32dev` PlatformIO target).
-- **Sensor:** Bosch BME280 connected over I²C (SDA on GPIO 21, SCL on GPIO 22 by default).
+- **MCU:** Seeed Studio XIAO ESP32-S3 (tested with the `seeed_xiao_esp32s3` PlatformIO target).
+- **Sensor:** Bosch BME280 connected over I²C (SDA on D9 / GPIO8, SCL on D10 / GPIO9).
 - **Connectivity:** 2.4 GHz Wi-Fi network with internet access for Supabase REST API calls.
 
 ## Firmware Architecture
@@ -105,7 +105,7 @@ Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Su
 
 ## Building and Uploading with PlatformIO
 
-The project uses a single PlatformIO environment defined in `platformio.ini` (`esp32-wroom-32e`). I personally use the [PlatformIO extension for VSCode](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide), but you can also build and upload from the command line with the `pio` CLI. 
+The project uses a single PlatformIO environment defined in `platformio.ini` (`xiao-esp32s3`). I personally use the [PlatformIO extension for VSCode](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide), but you can also build and upload from the command line with the `pio` CLI. 
 
 
 If PlatformIO cannot auto-detect your serial port, pass `--upload-port /dev/ttyUSB0` (or the correct device on your system) to the upload command.
