@@ -9,5 +9,42 @@
 #define DEVICE_ID            "esp32-env-node-01"
 #define N8N_WEBHOOK_URL      "http://your-n8n-server/webhook-url"  // N8N webhook for error alerts
 
+// Optional low-power tuning overrides.
+// Default production wake/upload interval is 600 seconds (10 minutes).
+// #define SAMPLE_INTERVAL_SECONDS 600
+// Debug mode uses its own default interval.
+// #define DEBUG_SAMPLE_INTERVAL_SECONDS 60
+// #define MIN_SAMPLE_INTERVAL_SECONDS 60
+// #define MAX_SAMPLE_INTERVAL_SECONDS 86400
+
+// Optional runtime mode override. In debug mode the firmware posts a heartbeat
+// to Discord on each cycle (if DEBUG_DISCORD_WEBHOOK_URL is defined) and uses
+// DEBUG_SAMPLE_INTERVAL_SECONDS as the default cadence.
+// #define DEVICE_DEBUG_MODE 1
+// #define DEBUG_DISCORD_WEBHOOK_URL "https://discord.com/api/webhooks/..."
+
+// Optional static IP configuration. A DHCP reservation in UniFi keeps the same
+// address, but enabling this removes the DHCP exchange on the ESP itself.
+// #define WIFI_USE_STATIC_IP 1
+// #define WIFI_STATIC_IP 10,0,0,50
+// #define WIFI_GATEWAY 10,0,0,1
+// #define WIFI_SUBNET 255,255,255,0
+// #define WIFI_DNS1 1,1,1,1
+// #define WIFI_DNS2 8,8,8,8
+// #define WIFI_OVERRIDE_DNS 1
+// #define WIFI_TX_POWER_DBM 15
+
+// Optional serial config window on non-timer boots. Set to 0 to disable.
+// Supported commands: `help`, `interval`, `interval <seconds>`, `interval default`
+// #define SERIAL_CONFIG_WINDOW_MS 5000
+
+// Optional debug hold before entering deep sleep. Useful when the board only
+// enumerates on COM7 while awake and you need time to attach a monitor.
+// #define DEBUG_AWAKE_WINDOW_MS 30000
+
+// Keep the board awake between cycles. In this mode the built-in LED stays on
+// while the firmware is awake, and `loop()` schedules periodic uploads.
+// #define DISABLE_DEEP_SLEEP 1
+
 // Optional: override the default events table declared in src/main.cpp
 // #define SUPABASE_EVENTS_TABLE "device_events"

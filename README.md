@@ -1,6 +1,6 @@
 # ESP32 Environmental Sensor
 
-This project is a proof of concept for logging environmental data to Supabase and then graphing that historical data using Grafana. It runs on an ESP32 and periodically samples a Bosch BME280 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
+This project is a proof of concept for logging environmental data to Supabase and then graphing that historical data using Grafana. It runs on an ESP32 and periodically samples a Bosch BME680 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and now uses the ESP32-S3 deep-sleep timer to wake, sample, upload, and return to sleep for low-power operation. The firmware also includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
 
 
 
@@ -12,7 +12,7 @@ This project is a proof of concept for logging environmental data to Supabase an
 
 ### Hardware Setup
 
-The hardware is very simple and consists only of two parts: a Seeed Studio XIAO ESP32-S3 and a BME280. In this example the XIAO uses pins D9/D10 for I²C (SDA/SCL) to the BME280 (D9 = GPIO8, D10 = GPIO9). 
+The hardware is very simple and consists only of two parts: a Seeed Studio XIAO ESP32-S3 and a BME680. In this example the XIAO uses pin 9 for I²C SDA and pin 10 for I²C SCL to the BME680 (D9 = GPIO8, D10 = GPIO9).
 
 <img width="885" height="516" alt="2025-09-27_18h00_38" src="https://github.com/user-attachments/assets/2b477d58-fbf3-41f0-8232-650ef7979f20" />
 
@@ -79,15 +79,17 @@ create table public.device_events (
 ## Hardware
 
 - **MCU:** Seeed Studio XIAO ESP32-S3 (tested with the `seeed_xiao_esp32s3` PlatformIO target).
-- **Sensor:** Bosch BME280 connected over I²C (SDA on D9 / GPIO8, SCL on D10 / GPIO9).
+- **Sensor:** Bosch BME680 connected over I²C (SDA on D9 / GPIO8, SCL on D10 / GPIO9).
 - **Connectivity:** 2.4 GHz Wi-Fi network with internet access for Supabase REST API calls.
 
 ## Firmware Architecture
 
-- `src/main.cpp` drives the application loop. On boot it connects to Wi-Fi, initializes the BME280, and logs a startup event to Supabase.
-- Sensor readings are captured once per minute (`SEND_EVERY_MS = 60000`) and posted to the Supabase `readings` table. Each payload carries `temperature_c`, `humidity_rh`, and `pressure_hpa` fields together with the `device_id`.
+- `src/main.cpp` supports two operating modes. Production mode defaults to a 10-minute sample/upload cadence, while debug mode defaults to 60 seconds and can send a Discord heartbeat on every cycle.
+- The firmware can either deep-sleep between cycles or stay awake and run the cadence from `loop()`. When the board is awake, the built-in LED stays on.
 - Event logging helpers stream operational telemetry (startup, implausible readings, recovery attempts) to the Supabase `device_events` table. This allows for observability when recovering from I²C or sensor errors.
 - Recovery flows perform plausibility checks, attempt soft resets, and reinitialize the sensor if measurements fall outside acceptable ranges.
+- Production mode stores the effective sample interval in NVS so it can be overridden at runtime and survive resets and deep-sleep cycles.
+- On successful cold boot, the built-in LED blinks three times and then remains on while the board stays awake.
 
 ## Configuration and Secrets
 
@@ -98,6 +100,25 @@ cp include/secrets.example.h include/secrets.h
 ```
 
 Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Supabase API key, preferred readings table, and device identifier. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
+
+Runtime and network behavior can also be overridden in `include/secrets.h`:
+
+- `DEVICE_DEBUG_MODE` switches the firmware into debug cadence/notification behavior.
+- `SAMPLE_INTERVAL_SECONDS` sets the default production interval in seconds. The shipped default is `600` (10 minutes).
+- `DEBUG_SAMPLE_INTERVAL_SECONDS` sets the default debug interval in seconds. The shipped default is `60`.
+- `MIN_SAMPLE_INTERVAL_SECONDS` and `MAX_SAMPLE_INTERVAL_SECONDS` define the allowed bounds for runtime overrides.
+- `DISABLE_DEEP_SLEEP` keeps the board awake between cycles and runs the schedule from `loop()`.
+- `BME_TEMPERATURE_OFFSET_C` applies a fixed calibration offset to the reported temperature in Celsius. Leave it at `0.0f` unless you have compared the node against a stable reference and want to trim a known warm or cool bias.
+- `DEBUG_DISCORD_WEBHOOK_URL` lets debug mode send a Discord heartbeat on each cycle.
+- `WIFI_USE_STATIC_IP` together with `WIFI_STATIC_IP`, `WIFI_GATEWAY`, `WIFI_SUBNET`, and DNS settings removes the DHCP exchange on the device. A UniFi DHCP reservation keeps the address stable, but it does not eliminate the DHCP round trip.
+- `SERIAL_CONFIG_WINDOW_MS` controls how long the firmware holds on non-timer boots before sensor/network work begins. During that window you can issue serial config commands or start a firmware upload. Set it to `0` to disable the boot hold entirely.
+
+When a serial monitor is attached during a non-timer boot, the firmware accepts these commands during the config window:
+
+- `help`
+- `interval`
+- `interval <seconds>`
+- `interval default`
 
 > Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
 
@@ -112,7 +133,7 @@ If PlatformIO cannot auto-detect your serial port, pass `--upload-port /dev/ttyU
 
 ## Runtime Behavior
 
-Successful Boot Serial Output Example:
+Successful Cold-Boot Serial Output Example:
 ```
 0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
 configsip: 0, SPIWP:0xee
@@ -125,22 +146,29 @@ entry 0x4008059c
 
 
 Booting...
+Sample interval: 600 seconds (default 600, allowed 60-86400)
 WiFi: connecting...
 WiFi: connected, IP=10.0.0.2
-BME sensor ID: 0x60
+BME680 ready at I2C address 0x76
 POST https://<database-path>.supabase.co/rest/v1/device_events -> 201
 EVENT[startup/info]: logged
 GOOD: T=24.48°C RH=39.1% P=828.8 hPa
+Sleeping for 600 seconds...
 ```
 
-- **Cadence:** The loop publishes fresh readings once per minute. Implausible data triggers up to three retries before the firmware attempts sensor recovery.
+- **Cadence:** In debug mode the board defaults to a 60-second sample/upload cadence. In production mode it defaults to 10 minutes unless you override it.
+- **Awake vs sleep:** With deep sleep enabled, the device wakes, samples, uploads, and sleeps. With deep sleep disabled, it stays awake, keeps Wi-Fi warm, and runs the same cycle from `loop()`.
+- **Wi-Fi speed:** The firmware caches the target BSSID/channel after a scan failure and can optionally use a static IP to avoid DHCP delay on future connects.
+- **Cold boot behavior:** Successful cold boots log a startup event, optionally send the startup webhook, blink the built-in LED three times, and then leave the LED on while awake.
+- **Debug notifications:** When `DEVICE_DEBUG_MODE=1` and `DEBUG_DISCORD_WEBHOOK_URL` is configured, each cycle also posts a Discord heartbeat with reading and upload status.
 - **Supabase endpoints:** Readings are POSTed to `https://<your-project>.supabase.co/rest/v1/<table>` using your Supabase project's API key for authentication. Events follow the same pattern, defaulting to the `device_events` table unless overridden.
-- **Session correlation:** Each boot generates a unique session ID combining the ESP32 MAC address and a random value to correlate events in Supabase.
+- **Session correlation:** Each wake generates a unique session ID combining the ESP32 MAC address and a random value to correlate events in Supabase.
 
 ## Testing and Troubleshooting
 
 - Use `pio device monitor` to inspect serial output. Successful uploads print `GOOD` lines with sensor values and HTTP status codes for Supabase requests.
-- Seeing repeated "BME280 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA/SCL connections, and that you are using a BME280 (not BMP280).
+- Seeing repeated "BME680 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA on pin 9, SCL on pin 10, and that you are using a BME680.
+- If temperature reads consistently warm, the usual cause is local self-heating from the ESP32, regulator, or stagnant air around the breakout rather than a missing Bosch library compensation step. Increase physical separation from the MCU if possible, avoid enclosing the sensor near warm components, and only then apply a small `BME_TEMPERATURE_OFFSET_C` trim if the warm bias is repeatable.
 - If Wi-Fi fails to connect, double-check your SSID/password in `include/secrets.h` and ensure the network allows the ESP32 MAC address.
 - Supabase errors (HTTP codes outside 200–299) often mean the API key or table names are incorrect. Confirm your REST endpoint and permissions.
 
