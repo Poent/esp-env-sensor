@@ -121,6 +121,14 @@
   #define BOOT_LED_BLINK_OFF_MS 120UL
 #endif
 
+#ifndef USB_SERVICE_MODE_ENABLED
+  #define USB_SERVICE_MODE_ENABLED 1
+#endif
+
+#ifndef USB_SERVICE_STATUS_INTERVAL_MS
+  #define USB_SERVICE_STATUS_INTERVAL_MS 5000UL
+#endif
+
 constexpr bool DEBUG_MODE_ENABLED = DEVICE_DEBUG_MODE != 0;
 constexpr bool DEEP_SLEEP_ENABLED = DISABLE_DEEP_SLEEP == 0;
 constexpr uint32_t DEBUG_SAMPLE_INTERVAL = DEBUG_SAMPLE_INTERVAL_SECONDS;
@@ -144,12 +152,19 @@ enum class BootMode {
   OtherReset,
 };
 
+enum class RuntimeMode {
+  Normal,
+  UsbService,
+};
+
 // ========= Sensor & timing =========
 Adafruit_BME680 bme;                   // I2C
 RTC_DATA_ATTR SensorReadings gLastGood = {NAN, NAN, NAN};
 uint32_t gSampleIntervalSeconds = DEFAULT_SAMPLE_INTERVAL_SECONDS;
 BootMode gBootMode = BootMode::OtherReset;
+RuntimeMode gRuntimeMode = RuntimeMode::Normal;
 uint8_t gBmeAddress = 0;
+bool gBmeInitialized = false;
 
 #if defined(LED_BUILTIN)
 constexpr int STATUS_LED_PIN = LED_BUILTIN;
@@ -192,6 +207,8 @@ uint32_t gWiFiConnectFailures = 0;
 unsigned long gLastSampleRunMs = 0;
 String gSerialInputBuffer;
 bool gStayAwakeOnStartupError = false;
+bool gUsbServiceEventSent = false;
+bool gUsbServiceWebhookSent = false;
 
 // ========= Debug mode =========
 // Set to true to send test webhooks at startup, false for normal operation
@@ -207,11 +224,22 @@ constexpr uint8_t WIFI_DNS1_BYTES[4] = {WIFI_DNS1};
 constexpr uint8_t WIFI_DNS2_BYTES[4] = {WIFI_DNS2};
 
 bool connectWiFi(unsigned long timeoutMs = WIFI_CONNECT_TIMEOUT_MS);
+const char* wifiStatusName(wl_status_t status);
 void logWiFiScanResults();
 void runConnectivityChecks();
 void printWiFiDiagnostics();
 void printTxPowerSummary();
 bool checkSupabaseTablesOnce();
+const char* runtimeModeName(RuntimeMode mode);
+bool isUsbHostAttached();
+void printRuntimeModeStatus();
+String buildServiceModeMetaJson();
+void maybeAnnounceUsbServiceMode();
+bool performManualSample(bool uploadRequested);
+void enterUsbServiceMode();
+void runNormalModeStartupSequence();
+void runUsbServiceLoopIteration();
+void runSamplingCycle();
 
 float applyTemperatureCompensation(float rawTemperatureC) {
   return rawTemperatureC + static_cast<float>(BME_TEMPERATURE_OFFSET_C);
@@ -318,12 +346,15 @@ void printSerialConfigHelp() {
   Serial.println("  interval           Print the active sample interval");
   Serial.println("  interval <seconds> Persist a new sample interval");
   Serial.println("  interval default   Clear the stored override");
+  Serial.println("  mode               Print runtime mode / USB / sensor state");
   Serial.println("  status             Print WiFi/IP/tx power details");
   Serial.println("  scan               Scan nearby WiFi networks");
   Serial.println("  ping               Ping gateway, 1.1.1.1, and google.com");
   Serial.println("  resolve <host>     Resolve a hostname");
   Serial.println("  txpower            Print configured WiFi TX power");
   Serial.println("  reconnect          Restart STA and reconnect WiFi");
+  Serial.println("  sample             Take one local sensor reading (USB service mode)");
+  Serial.println("  sample upload      Take one reading and upload it once (USB service mode)");
 }
 
 void handleSerialCommand(const String& rawCommand) {
@@ -340,6 +371,11 @@ void handleSerialCommand(const String& rawCommand) {
 
   if (command.equalsIgnoreCase("interval")) {
     printSampleIntervalConfig();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("mode")) {
+    printRuntimeModeStatus();
     return;
   }
 
@@ -365,6 +401,16 @@ void handleSerialCommand(const String& rawCommand) {
 
   if (command.equalsIgnoreCase("reconnect")) {
     connectWiFi();
+    return;
+  }
+
+  if (command.equalsIgnoreCase("sample upload")) {
+    performManualSample(true);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("sample")) {
+    performManualSample(false);
     return;
   }
 
@@ -439,6 +485,24 @@ void pollSerialCommands() {
     }
     gSerialInputBuffer += ch;
   }
+}
+
+const char* runtimeModeName(RuntimeMode mode) {
+  switch (mode) {
+    case RuntimeMode::UsbService:
+      return "usb_service";
+    case RuntimeMode::Normal:
+    default:
+      return "normal";
+  }
+}
+
+bool isUsbHostAttached() {
+  #if defined(ARDUINO_USB_MODE) && defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_MODE && ARDUINO_USB_CDC_ON_BOOT
+  return HWCDC::isPlugged();
+  #else
+  return false;
+  #endif
 }
 
 bool isStartupBoot() {
@@ -1450,6 +1514,7 @@ bool bmeReinit() {
     gBmeAddress = 0x77;
     ok = true;
   }
+  gBmeInitialized = ok;
   if (ok) bmeConfigure();
   return ok;
 }
@@ -1571,6 +1636,7 @@ bool initBME() {
     ok = true;
   }
 
+  gBmeInitialized = ok;
   if (ok) {
     bmeConfigure();
     Serial.printf("BME680 ready at I2C address 0x%02X\n", gBmeAddress);
@@ -1585,6 +1651,7 @@ bool initBME() {
 String buildBootMetaJson(bool firstReadingFailed) {
   String meta = String("{\"fw\":\"") + FW_VERSION +
                 "\",\"boot_mode\":\"" + bootModeName(gBootMode) +
+                "\",\"runtime_mode\":\"" + runtimeModeName(gRuntimeMode) +
                 "\",\"interval_s\":" + String(gSampleIntervalSeconds);
 
   if (gNetworkAvailable) {
@@ -1599,6 +1666,28 @@ String buildBootMetaJson(bool firstReadingFailed) {
 
   if (firstReadingFailed) {
     meta += ",\"first_reading_failed\":true";
+  }
+
+  meta += "}";
+  return meta;
+}
+
+String buildServiceModeMetaJson() {
+  String meta = String("{\"fw\":\"") + FW_VERSION +
+                "\",\"boot_mode\":\"" + bootModeName(gBootMode) +
+                "\",\"runtime_mode\":\"" + runtimeModeName(gRuntimeMode) +
+                "\",\"usb_host_attached\":" + String(isUsbHostAttached() ? "true" : "false") +
+                ",\"readings_paused\":true" +
+                ",\"interval_s\":" + String(gSampleIntervalSeconds);
+
+  if (gNetworkAvailable) {
+    meta += ",\"ip\":\"" + WiFi.localIP().toString() +
+            "\",\"mac_address\":\"" + WiFi.macAddress() +
+            "\",\"rssi_dbm\":" + String(WiFi.RSSI());
+  }
+
+  if (gSessionId.length()) {
+    meta += ",\"session_id\":\"" + gSessionId + "\"";
   }
 
   meta += "}";
@@ -1625,11 +1714,11 @@ void waitForSensorPowerRail() {
 }
 
 bool isAwakeMode() {
-  return !DEEP_SLEEP_ENABLED;
+  return gRuntimeMode == RuntimeMode::UsbService || !DEEP_SLEEP_ENABLED;
 }
 
 bool shouldRunStartupHooks() {
-  return isStartupBoot() && gLastSampleRunMs == 0;
+  return gRuntimeMode == RuntimeMode::Normal && isStartupBoot() && gLastSampleRunMs == 0;
 }
 
 void maybeRunStartupHooks(const SensorReadings* readings, bool readingOk) {
@@ -1660,6 +1749,196 @@ void maybeRunStartupHooks(const SensorReadings* readings, bool readingOk) {
       recordStartupError("startup warning webhook failed");
     }
   }
+}
+
+void printRuntimeModeStatus() {
+  wl_status_t wifiStatus = WiFi.status();
+  gNetworkAvailable = wifiStatus == WL_CONNECTED;
+  Serial.printf("Mode status: runtime=%s boot=%s usb_host=%s sensor=%s deep_sleep=%s wifi=%s (%d)\n",
+                runtimeModeName(gRuntimeMode),
+                bootModeName(gBootMode),
+                isUsbHostAttached() ? "attached" : "detached",
+                gBmeInitialized ? "ready" : "not_ready",
+                DEEP_SLEEP_ENABLED ? "enabled" : "disabled",
+                wifiStatusName(wifiStatus),
+                static_cast<int>(wifiStatus));
+  if (gNetworkAvailable) {
+    Serial.printf("Mode status: IP=%s RSSI=%d dBm\n",
+                  WiFi.localIP().toString().c_str(),
+                  static_cast<int>(WiFi.RSSI()));
+  }
+}
+
+void maybeAnnounceUsbServiceMode() {
+  if (gRuntimeMode != RuntimeMode::UsbService || !gNetworkAvailable) {
+    return;
+  }
+
+  String meta = buildServiceModeMetaJson();
+  if (!gUsbServiceEventSent) {
+    gUsbServiceEventSent = postEvent("service_mode",
+                                     "info",
+                                     "USB host detected; readings paused in diagnostic mode",
+                                     nullptr,
+                                     nullptr,
+                                     0,
+                                     true,
+                                     meta.c_str());
+  }
+
+  if (!gUsbServiceWebhookSent) {
+    gUsbServiceWebhookSent = sendWebhook("device_service_mode",
+                                         "Device is in USB diagnostic/charging mode; readings are paused",
+                                         "info",
+                                         nullptr,
+                                         meta.c_str());
+  }
+}
+
+bool performManualSample(bool uploadRequested) {
+  if (gRuntimeMode != RuntimeMode::UsbService) {
+    Serial.println("Manual sampling is only available in USB service mode.");
+    return false;
+  }
+
+  if (!gBmeInitialized) {
+    waitForSensorPowerRail();
+    if (!initBME()) {
+      Serial.println("Manual sample aborted: BME680 is unavailable.");
+      return false;
+    }
+  }
+
+  SensorReadings reading;
+  if (!takeReading(reading)) {
+    gBmeInitialized = false;
+    Serial.println("Manual sample failed: sensor did not return a valid reading.");
+    return false;
+  }
+
+  const SensorReadings* lastKnownGood = hasLastGoodReading() ? &gLastGood : nullptr;
+  if (!plausible(reading, lastKnownGood)) {
+    Serial.printf("Manual sample rejected as implausible: T=%.2fC RH=%.1f%% P=%.1fhPa\n",
+                  reading.temperature,
+                  reading.humidity,
+                  reading.pressure);
+    return false;
+  }
+
+  gLastGood = reading;
+  Serial.printf("MANUAL: T=%.2fC RH=%.1f%% P=%.1fhPa\n",
+                reading.temperature,
+                reading.humidity,
+                reading.pressure);
+
+  if (!uploadRequested) {
+    return true;
+  }
+
+  if (!gNetworkAvailable && !connectWiFi()) {
+    Serial.println("Manual upload skipped: WiFi unavailable.");
+    return false;
+  }
+
+  bool uploadOk = postReadings(reading);
+  Serial.println(uploadOk ? "Manual upload ok." : "Manual upload failed.");
+  return uploadOk;
+}
+
+void enterUsbServiceMode() {
+  gRuntimeMode = RuntimeMode::UsbService;
+  gBmeInitialized = false;
+  gUsbServiceEventSent = false;
+  gUsbServiceWebhookSent = false;
+  setAwakeLed(true);
+
+  Serial.println("USB service mode active: automatic readings paused, deep sleep suppressed.");
+  Serial.println("Use 'help' to list serial commands.");
+
+  if (!gNetworkAvailable && WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+  maybeAnnounceUsbServiceMode();
+  printRuntimeModeStatus();
+}
+
+void runNormalModeStartupSequence() {
+  gRuntimeMode = RuntimeMode::Normal;
+  setAwakeLed(true);
+
+  if (!gBmeInitialized) {
+    waitForSensorPowerRail();
+    if (!initBME()) {
+      if (!gNetworkAvailable && WiFi.status() != WL_CONNECTED) {
+        bool wifiOk = connectWiFi();
+        if (shouldRunStartupHooks() && !wifiOk) {
+          recordStartupError("initial WiFi connect failed during BME fault report");
+        }
+      }
+
+      String meta = buildBootMetaJson(false);
+      if (!postEvent("startup", "error", "BME init failed", nullptr, nullptr, 0, false, meta.c_str())) {
+        recordStartupError("startup BME error event failed");
+      }
+      if (shouldRunStartupHooks()) {
+        if (!sendWebhook("device_startup", "Device booted but BME init failed", "error", nullptr, meta.c_str())) {
+          recordStartupError("startup BME failure webhook failed");
+        }
+      }
+      Serial.println(DEEP_SLEEP_ENABLED ? "BME680 init failed; sleeping until the next interval."
+                                        : "BME680 init failed; staying awake for debug/monitoring.");
+      recordStartupError("BME init failed");
+      enterDeepSleep();
+      return;
+    }
+  }
+
+  runSamplingCycle();
+
+  if (DEBUG_WEBHOOKS && shouldRunStartupHooks()) {
+    testWebhooks();
+  }
+
+  if (DEEP_SLEEP_ENABLED) {
+    enterDeepSleep();
+  }
+}
+
+void runUsbServiceLoopIteration() {
+  static unsigned long lastStatusLogMs = 0;
+  static unsigned long lastReconnectAttemptMs = 0;
+
+  pollSerialCommands();
+
+  unsigned long now = millis();
+  wl_status_t status = WiFi.status();
+  gNetworkAvailable = status == WL_CONNECTED;
+
+  if (status != gLastReportedWiFiStatus) {
+    logWiFiStatus("WiFi: current status ", status);
+    gLastReportedWiFiStatus = status;
+  }
+
+  if (!gNetworkAvailable && now - lastReconnectAttemptMs >= WIFI_RECONNECT_INTERVAL_MS) {
+    Serial.println("USB service mode: retrying WiFi connection...");
+    lastReconnectAttemptMs = now;
+    connectWiFi();
+  }
+
+  maybeAnnounceUsbServiceMode();
+
+  if (now - lastStatusLogMs >= USB_SERVICE_STATUS_INTERVAL_MS) {
+    printRuntimeModeStatus();
+    lastStatusLogMs = now;
+  }
+
+  if (!isUsbHostAttached()) {
+    Serial.println("USB host detached; resuming normal sensing mode.");
+    runNormalModeStartupSequence();
+    return;
+  }
+
+  delay(250);
 }
 
 void runSamplingCycle() {
@@ -1726,55 +2005,33 @@ void setup() {
   delay(1000);
   registerWiFiEventLogger();
   gBootMode = detectBootMode();
+  gRuntimeMode = RuntimeMode::Normal;
   gSampleIntervalSeconds = loadSampleIntervalSeconds();
   initStatusLed();
   setAwakeLed(true);
 
   Serial.printf("\nBooting (%s)...\n", bootModeName(gBootMode));
   printSampleIntervalConfig();
-  Serial.printf("Runtime mode: %s, deep sleep: %s\n",
+  Serial.printf("Runtime profile: %s, deep sleep: %s\n",
                 DEBUG_MODE_ENABLED ? "debug" : "production",
                 DEEP_SLEEP_ENABLED ? "enabled" : "disabled");
-  handleSerialConfigWindow();
   ensureSessionId();
-  waitForSensorPowerRail();
 
-  if (!initBME()) {
-    if (!gNetworkAvailable && WiFi.status() != WL_CONNECTED) {
-      bool wifiOk = connectWiFi();
-      if (shouldRunStartupHooks() && !wifiOk) {
-        recordStartupError("initial WiFi connect failed during BME fault report");
-      }
-    }
-
-    String meta = buildBootMetaJson(false);
-    if (!postEvent("startup", "error", "BME init failed", nullptr, nullptr, 0, false, meta.c_str())) {
-      recordStartupError("startup BME error event failed");
-    }
-    if (shouldRunStartupHooks()) {
-      if (!sendWebhook("device_startup", "Device booted but BME init failed", "error", nullptr, meta.c_str())) {
-        recordStartupError("startup BME failure webhook failed");
-      }
-    }
-    Serial.println(DEEP_SLEEP_ENABLED ? "BME680 init failed; sleeping until the next interval."
-                                      : "BME680 init failed; staying awake for debug/monitoring.");
-    recordStartupError("BME init failed");
-    enterDeepSleep();
+  if (gBootMode != BootMode::TimerWake && USB_SERVICE_MODE_ENABLED && isUsbHostAttached()) {
+    enterUsbServiceMode();
     return;
   }
 
-  runSamplingCycle();
-
-  if (DEBUG_WEBHOOKS && shouldRunStartupHooks()) {
-    testWebhooks();
-  }
-
-  if (DEEP_SLEEP_ENABLED) {
-    enterDeepSleep();
-  }
+  handleSerialConfigWindow();
+  runNormalModeStartupSequence();
 }
 
 void loop() {
+  if (gRuntimeMode == RuntimeMode::UsbService) {
+    runUsbServiceLoopIteration();
+    return;
+  }
+
   #if DISABLE_DEEP_SLEEP
   const bool awakeLoopActive = true;
   #else

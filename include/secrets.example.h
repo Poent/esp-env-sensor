@@ -35,8 +35,16 @@
 // #define WIFI_TX_POWER_DBM 15
 
 // Optional serial config window on non-timer boots. Set to 0 to disable.
-// Supported commands: `help`, `interval`, `interval <seconds>`, `interval default`
+// Supported commands: `help`, `interval`, `interval <seconds>`, `interval default`,
+// `mode`, `status`, `scan`, `ping`, `resolve <host>`, `txpower`, `reconnect`,
+// `sample`, and `sample upload`
 // #define SERIAL_CONFIG_WINDOW_MS 5000
+
+// Enable USB host service mode on non-timer boots when the board is attached
+// to a computer over the ESP32 USB CDC/JTAG interface. In this mode automatic
+// readings are paused, the board stays awake, and serial commands remain active.
+// #define USB_SERVICE_MODE_ENABLED 1
+// #define USB_SERVICE_STATUS_INTERVAL_MS 5000
 
 // Optional debug hold before entering deep sleep. Useful when the board only
 // enumerates on COM7 while awake and you need time to attach a monitor.

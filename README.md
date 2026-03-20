@@ -112,13 +112,24 @@ Runtime and network behavior can also be overridden in `include/secrets.h`:
 - `DEBUG_DISCORD_WEBHOOK_URL` lets debug mode send a Discord heartbeat on each cycle.
 - `WIFI_USE_STATIC_IP` together with `WIFI_STATIC_IP`, `WIFI_GATEWAY`, `WIFI_SUBNET`, and DNS settings removes the DHCP exchange on the device. A UniFi DHCP reservation keeps the address stable, but it does not eliminate the DHCP round trip.
 - `SERIAL_CONFIG_WINDOW_MS` controls how long the firmware holds on non-timer boots before sensor/network work begins. During that window you can issue serial config commands or start a firmware upload. Set it to `0` to disable the boot hold entirely.
+- `USB_SERVICE_MODE_ENABLED` enables a special service mode on non-timer boots when the board detects a computer host on the ESP32 USB CDC/JTAG interface.
+- `USB_SERVICE_STATUS_INTERVAL_MS` controls how often service mode prints its local status summary.
 
-When a serial monitor is attached during a non-timer boot, the firmware accepts these commands during the config window:
+When a serial monitor is attached during a non-timer boot, the firmware accepts these commands:
 
 - `help`
 - `interval`
 - `interval <seconds>`
 - `interval default`
+- `mode`
+- `status`
+- `scan`
+- `ping`
+- `resolve <host>`
+- `txpower`
+- `reconnect`
+- `sample`
+- `sample upload`
 
 > Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
 
@@ -158,15 +169,29 @@ Sleeping for 600 seconds...
 
 - **Cadence:** In debug mode the board defaults to a 60-second sample/upload cadence. In production mode it defaults to 10 minutes unless you override it.
 - **Awake vs sleep:** With deep sleep enabled, the device wakes, samples, uploads, and sleeps. With deep sleep disabled, it stays awake, keeps Wi-Fi warm, and runs the same cycle from `loop()`.
+- **USB service mode:** On non-timer boots with a computer host attached over the ESP32 USB CDC/JTAG port, the firmware enters `usb_service` mode instead of sampling automatically. In this mode it stays awake, keeps serial commands active, connects to Wi-Fi for diagnostics, sends one informational paused-readings notification, and suppresses automatic polling, automatic fault alarms, and deep sleep until the host disconnects.
 - **Wi-Fi speed:** The firmware caches the target BSSID/channel after a scan failure and can optionally use a static IP to avoid DHCP delay on future connects.
 - **Cold boot behavior:** Successful cold boots log a startup event, optionally send the startup webhook, blink the built-in LED three times, and then leave the LED on while awake.
 - **Debug notifications:** When `DEVICE_DEBUG_MODE=1` and `DEBUG_DISCORD_WEBHOOK_URL` is configured, each cycle also posts a Discord heartbeat with reading and upload status.
 - **Supabase endpoints:** Readings are POSTed to `https://<your-project>.supabase.co/rest/v1/<table>` using your Supabase project's API key for authentication. Events follow the same pattern, defaulting to the `device_events` table unless overridden.
 - **Session correlation:** Each wake generates a unique session ID combining the ESP32 MAC address and a random value to correlate events in Supabase.
 
+### USB Service Mode
+
+When `usb_service` mode is active, the recommended serial commands are:
+
+- `mode` to confirm the runtime mode, USB-host state, Wi-Fi status, and sensor readiness.
+- `sample` to take one local BME680 reading without uploading it.
+- `sample upload` to take one reading and POST it once using the normal readings endpoint.
+
+If the USB host is unplugged while the board remains powered by battery, the firmware automatically exits `usb_service` mode, resumes the normal startup path, performs a normal sample/upload cycle, and then returns to its configured awake/sleep behavior.
+
 ## Testing and Troubleshooting
 
 - Use `pio device monitor` to inspect serial output. Successful uploads print `GOOD` lines with sensor values and HTTP status codes for Supabase requests.
+- To validate USB service mode, boot the board from a computer USB port with the sensor intentionally unpowered or disconnected. You should see `usb_service` status output, no automatic BME init attempts, no automatic deep sleep, and one informational paused-readings notification after Wi-Fi connects.
+- To validate manual sampling in service mode, keep the board on computer USB, power the sensor path you want to test, then run `sample` or `sample upload` from the serial monitor.
+- To validate automatic resume, keep the board battery-powered, start in USB service mode from a computer, then unplug the USB host. The firmware should announce that the host detached, resume the normal sensing path, and either sleep or stay awake based on your current deep-sleep configuration.
 - Seeing repeated "BME680 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA on pin 9, SCL on pin 10, and that you are using a BME680.
 - If temperature reads consistently warm, the usual cause is local self-heating from the ESP32, regulator, or stagnant air around the breakout rather than a missing Bosch library compensation step. Increase physical separation from the MCU if possible, avoid enclosing the sensor near warm components, and only then apply a small `BME_TEMPERATURE_OFFSET_C` trim if the warm bias is repeatable.
 - If Wi-Fi fails to connect, double-check your SSID/password in `include/secrets.h` and ensure the network allows the ESP32 MAC address.
