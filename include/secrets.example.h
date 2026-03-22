@@ -7,20 +7,28 @@
 #define SUPABASE_API_KEY     "your-project-api-key"   // Project Settings → API → Project API keys
 #define SUPABASE_TABLE       "readings"
 #define DEVICE_ID            "esp32-env-node-01"
-#define N8N_WEBHOOK_URL      "http://your-n8n-server/webhook-url"  // N8N webhook for error alerts
+#define N8N_WEBHOOK_URL      "https://your-n8n-domain/webhook-url"  // N8N webhook for alerts
+
+// Optional Cloudflare Access service-token headers for N8N webhooks.
+// Define both values together when the N8N endpoint is protected by Access.
+// #define N8N_CF_ACCESS_CLIENT_ID     "your-cloudflare-access-client-id"
+// #define N8N_CF_ACCESS_CLIENT_SECRET "your-cloudflare-access-client-secret"
 
 // Optional low-power tuning overrides.
 // Default production wake/upload interval is 600 seconds (10 minutes).
 // #define SAMPLE_INTERVAL_SECONDS 600
 // Debug mode uses its own default interval.
 // #define DEBUG_SAMPLE_INTERVAL_SECONDS 60
+// Low-battery alert defaults: warn at 3.50 V and clear at 3.65 V.
+// #define LOW_BATTERY_ALERT_V 3.5f
+// #define LOW_BATTERY_CLEAR_V 3.65f
 // #define MIN_SAMPLE_INTERVAL_SECONDS 60
 // #define MAX_SAMPLE_INTERVAL_SECONDS 86400
 
-// Optional runtime mode override. In debug mode the firmware posts a heartbeat
-// to Discord on each cycle (if DEBUG_DISCORD_WEBHOOK_URL is defined) and uses
+// Debug mode is selected by building the `xiao-esp32s3-debug` environment in
+// platformio.ini. In debug mode the firmware posts a heartbeat to Discord on
+// each cycle (if DEBUG_DISCORD_WEBHOOK_URL is defined) and uses
 // DEBUG_SAMPLE_INTERVAL_SECONDS as the default cadence.
-// #define DEVICE_DEBUG_MODE 1
 // #define DEBUG_DISCORD_WEBHOOK_URL "https://discord.com/api/webhooks/..."
 
 // Optional static IP configuration. A DHCP reservation in UniFi keeps the same

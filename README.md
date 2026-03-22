@@ -1,6 +1,6 @@
 # ESP32 Environmental Sensor
 
-This project is a proof of concept for logging environmental data to Supabase and then graphing that historical data using Grafana. It runs on an ESP32 and periodically samples a Bosch BME680 environmental sensor to log temperature, relative humidity, and barometric pressure to Supabase. It is built with the Arduino framework via PlatformIO and now uses the ESP32-S3 deep-sleep timer to wake, sample, upload, and return to sleep for low-power operation. The firmware also includes robust recovery routines that keep the sensor publishing even if I²C communication glitches occur.
+This project logs Bosch BME680 environmental data from a Seeed Studio XIAO ESP32-S3 to Supabase and visualizes the history in Grafana. The firmware is built with the Arduino framework via PlatformIO and is designed for low-power operation: wake, sample, upload, and return to deep sleep. It also includes runtime overrides, startup diagnostics, USB service mode, and recovery logic for intermittent I2C or sensor faults.
 
 
 
@@ -18,7 +18,7 @@ The hardware is very simple and consists only of two parts: a Seeed Studio XIAO 
 
 ### Software setup
 
-Getting started requires configuring the development environment, backend storage, and visualization stack. Start by cloning this repository to a local folder and then opening the folder in VSCode. Ensure that the platformIO extension is installed, and then proceed to setting up Supabase and Grafana free instances. Setting up Supabase and Grafana is outside the scope of this project, but the following resources provide the canonical setup guides for each component:
+Getting started requires configuring the development environment, backend storage, and visualization stack. Clone this repository locally, open it in VS Code, install PlatformIO if needed, then provision Supabase and Grafana. The platform guides below cover account and service creation; the project-specific steps follow in the next sections.
 
 - **PlatformIO:** Follow the [official PlatformIO IDE installation guide](https://docs.platformio.org/en/stable/integration/ide/vscode.html) for setup with VSCode
   or the [CLI quick start](https://docs.platformio.org/en/stable/core/quickstart.html) to prepare your build and upload tools.
@@ -28,7 +28,7 @@ Getting started requires configuring the development environment, backend storag
 
 ### Supabase Schema Setup
 
-The firmware for the ESP32 sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. Once your Supabase account, project, and database are setup you can create both tables (and enable inserts using your project's public API key) by executing the SQL below inside the Supabase SQL editor. Re-run the block if you redeploy into a fresh Supabase project.
+The firmware sends environmental samples to a `readings` table and operational telemetry to a `device_events` table. Once your Supabase project is ready, execute the SQL below in the SQL editor. Re-run the block if you redeploy into a fresh project.
 
 ```sql
 -- Enables gen_random_uuid() for the device_events primary key.
@@ -41,6 +41,8 @@ create table public.readings (
   temperature_c double precision not null,
   humidity_rh double precision not null,
   pressure_hpa double precision not null,
+  battery_voltage_v double precision null,
+  battery_pct double precision null,
   constraint readings_pkey primary key (id)
 );
 
@@ -69,12 +71,26 @@ create table public.device_events (
   )
 );
 
+create index if not exists readings_device_id_recorded_at_idx
+  on public.readings (device_id, recorded_at desc);
+
+create index if not exists device_events_device_id_created_at_idx
+  on public.device_events (device_id, created_at desc);
+
 ```
-> When Row Level Security is enabled you can still query the data from Grafana or other backends by creating additional policies (e.g., `for select`) scoped to the roles you use for analytics connections.
+> If you enable Row Level Security, add matching `insert` policies for the API key role used by the device and `select` policies for the Grafana connection role.
 
 ### Grafana Setup
 
-[TODO] -> grafana dashboard configuration is included under "grafana\ESP32 Sensors-dashboard.json". Setting up grafana, connecting it to Supabase, and loading the dashboard layout is not currently described in the project. 
+The repository includes a starter dashboard export at `grafana/ESP32 Sensors-dashboard.json`.
+
+1. In Supabase, gather the Postgres connection details for your project: host, database name, username, password, port, and SSL requirements.
+2. In Grafana, create a PostgreSQL data source that points at the Supabase Postgres endpoint.
+3. Import `grafana/ESP32 Sensors-dashboard.json` through Grafana's dashboard import flow.
+4. During import, remap the dashboard to the PostgreSQL data source you just created.
+5. Update the panel queries so the hard-coded device filter matches your `DEVICE_ID`. The exported dashboard currently uses `esp32-lab-01`.
+
+The dashboard queries `public.readings` for temperature, humidity, and pressure time series, and `device_events` for warning/error counts. If you keep the default schema and table names from this README, the only value you usually need to change is the device ID filter.
 
 ## Hardware
 
@@ -89,6 +105,7 @@ create table public.device_events (
 - Event logging helpers stream operational telemetry (startup, implausible readings, recovery attempts) to the Supabase `device_events` table. This allows for observability when recovering from I²C or sensor errors.
 - Recovery flows perform plausibility checks, attempt soft resets, and reinitialize the sensor if measurements fall outside acceptable ranges.
 - Production mode stores the effective sample interval in NVS so it can be overridden at runtime and survive resets and deep-sleep cycles.
+- If the sensor is unavailable at startup while the board remains awake for diagnostics, later awake-mode cycles retry BME680 initialization instead of remaining stuck in a failed state.
 - On successful cold boot, the built-in LED blinks three times and then remains on while the board stays awake.
 
 ## Configuration and Secrets
@@ -99,16 +116,23 @@ Copy the example secrets header into place and fill in your credentials before b
 cp include/secrets.example.h include/secrets.h
 ```
 
-Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Supabase API key, preferred readings table, and device identifier. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
+```powershell
+Copy-Item include\secrets.example.h include\secrets.h
+```
+
+Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Supabase API key, preferred readings table, device identifier, and webhook endpoint. You can optionally override the default events table by defining `SUPABASE_EVENTS_TABLE`.
 
 Runtime and network behavior can also be overridden in `include/secrets.h`:
 
-- `DEVICE_DEBUG_MODE` switches the firmware into debug cadence/notification behavior.
+- Build the `xiao-esp32s3-debug` PlatformIO environment to enable debug cadence/notification behavior.
 - `SAMPLE_INTERVAL_SECONDS` sets the default production interval in seconds. The shipped default is `600` (10 minutes).
 - `DEBUG_SAMPLE_INTERVAL_SECONDS` sets the default debug interval in seconds. The shipped default is `60`.
+- `LOW_BATTERY_ALERT_V` and `LOW_BATTERY_CLEAR_V` control the low-battery warning threshold and recovery hysteresis. The shipped defaults are `3.5` V and `3.65` V.
 - `MIN_SAMPLE_INTERVAL_SECONDS` and `MAX_SAMPLE_INTERVAL_SECONDS` define the allowed bounds for runtime overrides.
 - `DISABLE_DEEP_SLEEP` keeps the board awake between cycles and runs the schedule from `loop()`.
 - `BME_TEMPERATURE_OFFSET_C` applies a fixed calibration offset to the reported temperature in Celsius. Leave it at `0.0f` unless you have compared the node against a stable reference and want to trim a known warm or cool bias.
+- `N8N_WEBHOOK_URL` is the default destination for startup, error, recovery, and USB service-mode notifications.
+- `N8N_CF_ACCESS_CLIENT_ID` and `N8N_CF_ACCESS_CLIENT_SECRET` add the `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers on requests sent to `N8N_WEBHOOK_URL`. Define both when the webhook is behind Cloudflare Access.
 - `DEBUG_DISCORD_WEBHOOK_URL` lets debug mode send a Discord heartbeat on each cycle.
 - `WIFI_USE_STATIC_IP` together with `WIFI_STATIC_IP`, `WIFI_GATEWAY`, `WIFI_SUBNET`, and DNS settings removes the DHCP exchange on the device. A UniFi DHCP reservation keeps the address stable, but it does not eliminate the DHCP round trip.
 - `SERIAL_CONFIG_WINDOW_MS` controls how long the firmware holds on non-timer boots before sensor/network work begins. During that window you can issue serial config commands or start a firmware upload. Set it to `0` to disable the boot hold entirely.
@@ -130,6 +154,7 @@ When a serial monitor is attached during a non-timer boot, the firmware accepts 
 - `reconnect`
 - `sample`
 - `sample upload`
+- `voltage`
 
 > Supabase exposes project API keys under **Project Settings → API**. Use the "Generate new API key" action to rotate credentials and copy the fresh client key into `SUPABASE_API_KEY` so that it matches the latest Supabase recommendations.
 
@@ -137,10 +162,18 @@ When a serial monitor is attached during a non-timer boot, the firmware accepts 
 
 ## Building and Uploading with PlatformIO
 
-The project uses a single PlatformIO environment defined in `platformio.ini` (`xiao-esp32s3`). I personally use the [PlatformIO extension for VSCode](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide), but you can also build and upload from the command line with the `pio` CLI. 
+The project defines two PlatformIO environments in `platformio.ini`: `xiao-esp32s3` for production and `xiao-esp32s3-debug` for short-cadence debug runs.
 
+Common CLI commands:
 
-If PlatformIO cannot auto-detect your serial port, pass `--upload-port /dev/ttyUSB0` (or the correct device on your system) to the upload command.
+```bash
+pio run -e xiao-esp32s3
+pio run -e xiao-esp32s3 -t upload
+pio run -e xiao-esp32s3-debug -t upload
+pio device monitor --baud 115200
+```
+
+If PlatformIO cannot auto-detect your serial port, pass `--upload-port <port>` to the upload command. Example: `pio run -e xiao-esp32s3 -t upload --upload-port COM4`.
 
 ## Runtime Behavior
 
@@ -156,8 +189,9 @@ load:0x40080400,len:3152
 entry 0x4008059c
 
 
-Booting...
-Sample interval: 600 seconds (default 600, allowed 60-86400)
+Booting (cold_boot)...
+Sample interval: 600 seconds (mode=production, default 600, allowed 60-86400)
+Runtime profile: production, deep sleep: enabled
 WiFi: connecting...
 WiFi: connected, IP=10.0.0.2
 BME680 ready at I2C address 0x76
@@ -170,7 +204,7 @@ Sleeping for 600 seconds...
 - **Cadence:** In debug mode the board defaults to a 60-second sample/upload cadence. In production mode it defaults to 10 minutes unless you override it.
 - **Awake vs sleep:** With deep sleep enabled, the device wakes, samples, uploads, and sleeps. With deep sleep disabled, it stays awake, keeps Wi-Fi warm, and runs the same cycle from `loop()`.
 - **USB service mode:** On non-timer boots with a computer host attached over the ESP32 USB CDC/JTAG port, the firmware enters `usb_service` mode instead of sampling automatically. In this mode it stays awake, keeps serial commands active, connects to Wi-Fi for diagnostics, sends one informational paused-readings notification, and suppresses automatic polling, automatic fault alarms, and deep sleep until the host disconnects.
-- **Wi-Fi speed:** The firmware caches the target BSSID/channel after a scan failure and can optionally use a static IP to avoid DHCP delay on future connects.
+- **Wi-Fi speed:** The firmware caches the target BSSID/channel after a scan failure and can optionally use a static IP to avoid DHCP delay on future connects. Active ping tests only run when you invoke the `ping` serial command; a normal successful connect no longer waits on the diagnostic ping sequence.
 - **Cold boot behavior:** Successful cold boots log a startup event, optionally send the startup webhook, blink the built-in LED three times, and then leave the LED on while awake.
 - **Debug notifications:** When `DEVICE_DEBUG_MODE=1` and `DEBUG_DISCORD_WEBHOOK_URL` is configured, each cycle also posts a Discord heartbeat with reading and upload status.
 - **Supabase endpoints:** Readings are POSTed to `https://<your-project>.supabase.co/rest/v1/<table>` using your Supabase project's API key for authentication. Events follow the same pattern, defaulting to the `device_events` table unless overridden.
@@ -193,6 +227,7 @@ If the USB host is unplugged while the board remains powered by battery, the fir
 - To validate manual sampling in service mode, keep the board on computer USB, power the sensor path you want to test, then run `sample` or `sample upload` from the serial monitor.
 - To validate automatic resume, keep the board battery-powered, start in USB service mode from a computer, then unplug the USB host. The firmware should announce that the host detached, resume the normal sensing path, and either sleep or stay awake based on your current deep-sleep configuration.
 - Seeing repeated "BME680 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA on pin 9, SCL on pin 10, and that you are using a BME680.
+- If the sensor is missing during a non-sleeping diagnostic session, the firmware now retries BME initialization on later awake-mode intervals. You can keep the board connected, restore sensor power or wiring, and wait for the next cycle instead of rebooting.
 - If temperature reads consistently warm, the usual cause is local self-heating from the ESP32, regulator, or stagnant air around the breakout rather than a missing Bosch library compensation step. Increase physical separation from the MCU if possible, avoid enclosing the sensor near warm components, and only then apply a small `BME_TEMPERATURE_OFFSET_C` trim if the warm bias is repeatable.
 - If Wi-Fi fails to connect, double-check your SSID/password in `include/secrets.h` and ensure the network allows the ESP32 MAC address.
 - Supabase errors (HTTP codes outside 200–299) often mean the API key or table names are incorrect. Confirm your REST endpoint and permissions.

@@ -23,6 +23,15 @@
 #ifndef SUPABASE_EVENTS_TABLE
   #define SUPABASE_EVENTS_TABLE "device_events"
 #endif
+
+#ifndef N8N_CF_ACCESS_CLIENT_ID
+  #define N8N_CF_ACCESS_CLIENT_ID ""
+#endif
+
+#ifndef N8N_CF_ACCESS_CLIENT_SECRET
+  #define N8N_CF_ACCESS_CLIENT_SECRET ""
+#endif
+
 #define FW_VERSION "envnode-1.2.0"
 
 #ifndef SAMPLE_INTERVAL_SECONDS
@@ -101,6 +110,34 @@
   #define SENSOR_POWER_SETTLE_MS 500UL
 #endif
 
+// ========= Battery / sense-enable hardware =========
+#if defined(D3)
+constexpr int SENSE_EN_PIN = D3;        // GPIO4 — 2N2222 NPN base driver (10kΩ series R)
+#else
+constexpr int SENSE_EN_PIN = 4;
+#endif
+
+#if defined(A0)
+constexpr int VBAT_ADC_PIN = A0;        // GPIO1 — midpoint of 100k/100k voltage divider
+#else
+constexpr int VBAT_ADC_PIN = 1;
+#endif
+
+constexpr float VBAT_DIVIDER_SCALE = 2.0f;     // Vout = Vbat / 2  (R1=R2=100kΩ)
+constexpr float VBAT_ADC_REF_V     = 3.3f;
+constexpr int   VBAT_ADC_BITS      = 12;        // 4095 max count
+constexpr float LIPO_MIN_V         = 3.0f;      // 0% SoC
+constexpr float LIPO_MAX_V         = 4.2f;      // 100% SoC
+constexpr int   VBAT_OVERSAMPLE    = 8;
+
+#ifndef LOW_BATTERY_ALERT_V
+  #define LOW_BATTERY_ALERT_V 3.5f
+#endif
+
+#ifndef LOW_BATTERY_CLEAR_V
+  #define LOW_BATTERY_CLEAR_V 3.65f
+#endif
+
 #ifndef BME_TEMPERATURE_OFFSET_C
   #define BME_TEMPERATURE_OFFSET_C 0.0f
 #endif
@@ -141,9 +178,11 @@ constexpr const char* SAMPLE_INTERVAL_KEY = "interval_s";
 
 // Data model
 struct SensorReadings {
-  float temperature;
-  float humidity;
-  float pressure; // hPa
+  float temperature    = NAN;
+  float humidity       = NAN;
+  float pressure       = NAN;  // hPa
+  float batteryVoltage = NAN;  // V
+  float batteryPercent = NAN;  // 0–100
 };
 
 enum class BootMode {
@@ -159,12 +198,15 @@ enum class RuntimeMode {
 
 // ========= Sensor & timing =========
 Adafruit_BME680 bme;                   // I2C
-RTC_DATA_ATTR SensorReadings gLastGood = {NAN, NAN, NAN};
+RTC_DATA_ATTR SensorReadings gLastGood;
 uint32_t gSampleIntervalSeconds = DEFAULT_SAMPLE_INTERVAL_SECONDS;
 BootMode gBootMode = BootMode::OtherReset;
 RuntimeMode gRuntimeMode = RuntimeMode::Normal;
 uint8_t gBmeAddress = 0;
 bool gBmeInitialized = false;
+bool gSensePowerEnabled = false;
+RTC_DATA_ATTR bool gLowBatteryAlertActive = false;
+RTC_DATA_ATTR bool gLowBatteryAlertPending = false;
 
 #if defined(LED_BUILTIN)
 constexpr int STATUS_LED_PIN = LED_BUILTIN;
@@ -236,6 +278,19 @@ void printRuntimeModeStatus();
 String buildServiceModeMetaJson();
 void maybeAnnounceUsbServiceMode();
 bool performManualSample(bool uploadRequested);
+bool postEvent(const char* event_type,
+               const char* severity,
+               const String& message,
+               const SensorReadings* snap,
+               const char* action,
+               int attempt,
+               bool action_success,
+               const char* meta_json);
+bool sendWebhook(const char* alert_type,
+                 const String& message,
+                 const char* severity,
+                 const SensorReadings* readings,
+                 const char* extra_data);
 void enterUsbServiceMode();
 void runNormalModeStartupSequence();
 void runUsbServiceLoopIteration();
@@ -340,6 +395,101 @@ void printSampleIntervalConfig() {
                 static_cast<unsigned long>(MAX_ALLOWED_SAMPLE_INTERVAL_SECONDS));
 }
 
+// ========= Sense-enable / battery voltage =========
+
+void initSensePower() {
+  pinMode(SENSE_EN_PIN, OUTPUT);
+  digitalWrite(SENSE_EN_PIN, LOW);
+  gSensePowerEnabled = false;
+}
+
+void enableSensePower() {
+  if (gSensePowerEnabled) {
+    return;
+  }
+
+  digitalWrite(SENSE_EN_PIN, HIGH);
+  gSensePowerEnabled = true;
+}
+
+void disableSensePower() {
+  if (!gSensePowerEnabled) {
+    return;
+  }
+
+  digitalWrite(SENSE_EN_PIN, LOW);
+  gSensePowerEnabled = false;
+
+  // The BME680 is fully depowered by the low-side switch, so any cached init
+  // state becomes invalid as soon as the transistor turns off.
+  gBmeInitialized = false;
+  gBmeAddress = 0;
+}
+
+// Oversample ADC and scale through the voltage divider to get VBAT.
+float readBatteryVoltage() {
+  long sum = 0;
+  for (int i = 0; i < VBAT_OVERSAMPLE; ++i) {
+    sum += analogRead(VBAT_ADC_PIN);
+  }
+  float pinV = (static_cast<float>(sum) / VBAT_OVERSAMPLE)
+               * (VBAT_ADC_REF_V / ((1 << VBAT_ADC_BITS) - 1));
+  return pinV * VBAT_DIVIDER_SCALE;
+}
+
+// Linear approximation: 3.0 V = 0%, 4.2 V = 100%. Clamped to [0, 100].
+float batteryVoltageToPercent(float v) {
+  if (isnan(v)) return NAN;
+  float pct = (v - LIPO_MIN_V) / (LIPO_MAX_V - LIPO_MIN_V) * 100.0f;
+  return constrain(pct, 0.0f, 100.0f);
+}
+
+void maybeHandleBatteryAlerts(const SensorReadings& readings) {
+  if (isnan(readings.batteryVoltage)) {
+    return;
+  }
+
+  if (!gLowBatteryAlertActive && readings.batteryVoltage <= LOW_BATTERY_ALERT_V) {
+    gLowBatteryAlertActive = true;
+    gLowBatteryAlertPending = true;
+  } else if (gLowBatteryAlertActive && readings.batteryVoltage >= LOW_BATTERY_CLEAR_V) {
+    gLowBatteryAlertActive = false;
+    gLowBatteryAlertPending = false;
+
+    String message = String("Battery recovered to ") + String(readings.batteryVoltage, 2) +
+                     "V (" + String(readings.batteryPercent, 0) + "%)";
+    String meta = String("{\"battery_voltage_v\":") + String(readings.batteryVoltage, 3) +
+                  ",\"battery_pct\":" + String(readings.batteryPercent, 1) +
+                  ",\"alert_threshold_v\":" + String(LOW_BATTERY_ALERT_V, 2) +
+                  ",\"clear_threshold_v\":" + String(LOW_BATTERY_CLEAR_V, 2) + "}";
+    postEvent("battery_ok", "info", message, &readings, nullptr, 0, true, meta.c_str());
+    sendWebhook("battery_ok", message, "info", &readings, meta.c_str());
+    return;
+  }
+
+  if (!gLowBatteryAlertPending) {
+    return;
+  }
+
+  if (!gNetworkAvailable) {
+    Serial.println("Battery low alert pending: WiFi unavailable");
+    return;
+  }
+
+  String message = String("Battery low: ") + String(readings.batteryVoltage, 2) +
+                   "V (" + String(readings.batteryPercent, 0) + "%)";
+  String meta = String("{\"battery_voltage_v\":") + String(readings.batteryVoltage, 3) +
+                ",\"battery_pct\":" + String(readings.batteryPercent, 1) +
+                ",\"alert_threshold_v\":" + String(LOW_BATTERY_ALERT_V, 2) +
+                ",\"clear_threshold_v\":" + String(LOW_BATTERY_CLEAR_V, 2) + "}";
+
+  bool eventOk = postEvent("battery_low", "warning", message, &readings, nullptr, 0, false, meta.c_str());
+  bool webhookOk = sendWebhook("battery_low", message, "warning", &readings, meta.c_str());
+  if (eventOk && webhookOk) {
+    gLowBatteryAlertPending = false;
+  }
+}
+
 void printSerialConfigHelp() {
   Serial.println("Serial config commands:");
   Serial.println("  help               Show available commands");
@@ -355,6 +505,7 @@ void printSerialConfigHelp() {
   Serial.println("  reconnect          Restart STA and reconnect WiFi");
   Serial.println("  sample             Take one local sensor reading (USB service mode)");
   Serial.println("  sample upload      Take one reading and upload it once (USB service mode)");
+  Serial.println("  voltage            Read and display battery voltage + charge %");
 }
 
 void handleSerialCommand(const String& rawCommand) {
@@ -411,6 +562,16 @@ void handleSerialCommand(const String& rawCommand) {
 
   if (command.equalsIgnoreCase("sample")) {
     performManualSample(false);
+    return;
+  }
+
+  if (command.equalsIgnoreCase("voltage")) {
+    enableSensePower();
+    delay(10);
+    float v   = readBatteryVoltage();
+    float pct = batteryVoltageToPercent(v);
+    disableSensePower();
+    Serial.printf("Battery: %.3fV (%.1f%%)\n", v, pct);
     return;
   }
 
@@ -615,6 +776,7 @@ void enterDeepSleep() {
   }
 
   setAwakeLed(false);
+  disableSensePower();   // idempotent safety: ensure BJT is LOW before sleep
   shutdownWiFi();
   esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(gSampleIntervalSeconds) * 1000000ULL);
   Serial.printf("Sleeping for %lu seconds...\n", static_cast<unsigned long>(gSampleIntervalSeconds));
@@ -769,6 +931,22 @@ bool beginHttpRequest(HTTPClient& http,
   return http.begin(plainClient, url);
 }
 
+void addWebhookAccessHeaders(HTTPClient& http, const char* url) {
+  if (!url || strcmp(url, N8N_WEBHOOK_URL) != 0) {
+    return;
+  }
+
+  if (N8N_CF_ACCESS_CLIENT_ID[0] && N8N_CF_ACCESS_CLIENT_SECRET[0]) {
+    http.addHeader("CF-Access-Client-Id", N8N_CF_ACCESS_CLIENT_ID);
+    http.addHeader("CF-Access-Client-Secret", N8N_CF_ACCESS_CLIENT_SECRET);
+    return;
+  }
+
+  if (N8N_CF_ACCESS_CLIENT_ID[0] || N8N_CF_ACCESS_CLIENT_SECRET[0]) {
+    Serial.println("Webhook: Cloudflare Access service token is incomplete; skipping auth headers");
+  }
+}
+
 void configureWiFiNetworkStack() {
   WiFi.persistent(false);
   WiFi.setSleep(false);
@@ -885,7 +1063,10 @@ void logWiFiScanResults() {
     uint8_t encryption = WiFi.encryptionType(index);
     int32_t channel = WiFi.channel(index);
     uint8_t bssid[6] = {0};
-    WiFi.BSSID(index, bssid);
+    uint8_t* bssidPtr = WiFi.BSSID(index);
+    if (bssidPtr) {
+      memcpy(bssid, bssidPtr, sizeof(bssid));
+    }
     bool isTarget = ssid == WIFI_SSID;
     if (isTarget) {
       foundTarget = true;
@@ -1014,7 +1195,6 @@ bool connectWiFi(unsigned long timeoutMs) {
                 static_cast<unsigned long>(millis() - connectStartedAt));
   printWiFiNetworkSummary();
   printTxPowerSummary();
-  runConnectivityChecks();
   return true;
 }
 
@@ -1132,11 +1312,16 @@ bool checkSupabaseTablesOnce() {
   return false;
 }
 
-bool postReadingRow(float tC, float h, float p_hPa) {
+bool postReadingRow(float tC, float h, float p_hPa, float batV, float batPct) {
   String payload = String("{\"device_id\":\"") + DEVICE_ID +
                    "\",\"temperature_c\":" + String(tC, 2) +
-                   ",\"humidity_rh\":"   + String(h, 2) +
-                   ",\"pressure_hpa\":"  + String(p_hPa, 2) + "}";
+                   ",\"humidity_rh\":"     + String(h, 2) +
+                   ",\"pressure_hpa\":"    + String(p_hPa, 2);
+  if (!isnan(batV)) {
+    payload += ",\"battery_voltage_v\":" + String(batV, 3);
+    payload += ",\"battery_pct\":"       + String(batPct, 1);
+  }
+  payload += "}";
   return supabaseInsert(SUPABASE_TABLE, payload);
 }
 
@@ -1202,9 +1387,13 @@ bool sendWebhook(const char* alert_type,
   // Add sensor readings if provided
   if (readings && !isnan(readings->temperature)) {
     payload += ",\"readings\":{";
-    payload += "\"temperature_c\":" + String(readings->temperature, 2);
-    payload += ",\"humidity_rh\":" + String(readings->humidity, 2);
-    payload += ",\"pressure_hpa\":" + String(readings->pressure, 2);
+    payload += "\"temperature_c\":"  + String(readings->temperature, 2);
+    payload += ",\"humidity_rh\":"   + String(readings->humidity, 2);
+    payload += ",\"pressure_hpa\":"  + String(readings->pressure, 2);
+    if (!isnan(readings->batteryVoltage)) {
+      payload += ",\"battery_voltage_v\":" + String(readings->batteryVoltage, 3);
+      payload += ",\"battery_pct\":"       + String(readings->batteryPercent, 1);
+    }
     payload += "}";
   }
   
@@ -1233,6 +1422,7 @@ bool sendWebhook(const char* alert_type,
   }
   
   http.addHeader("Content-Type", "application/json");
+  addWebhookAccessHeaders(http, N8N_WEBHOOK_URL);
   int code = http.POST(payload);
   String responseBody;
   if (code > 0) {
@@ -1308,6 +1498,7 @@ bool sendDebugDiscordMessage(const SensorReadings* readings,
   }
 
   http.addHeader("Content-Type", "application/json");
+  addWebhookAccessHeaders(http, debugWebhookUrl);
   int code = http.POST(payload);
   String responseBody;
   if (code > 0) {
@@ -1329,7 +1520,10 @@ void testWebhooks() {
   Serial.println("Sending test webhooks (one of each type)...");
   
   // Create some sample readings for testing
-  SensorReadings testReadings = {23.5, 45.0, 1013.25};
+  SensorReadings testReadings;
+  testReadings.temperature = 23.5f;
+  testReadings.humidity = 45.0f;
+  testReadings.pressure = 1013.25f;
   String testExtra = "{\"test_mode\":true,\"ip_address\":\"" + WiFi.localIP().toString() + "\"}";
   
   // Test 1: Info - Device Startup
@@ -1614,7 +1808,8 @@ bool attemptRecoverySequence(SensorReadings& reading, const SensorReadings* last
 // ================= App logic =================
 bool postReadings(const SensorReadings& readings) {
   if (!isnan(readings.temperature) && !isnan(readings.humidity) && !isnan(readings.pressure)) {
-    bool ok = postReadingRow(readings.temperature, readings.humidity, readings.pressure);
+    bool ok = postReadingRow(readings.temperature, readings.humidity, readings.pressure,
+                             readings.batteryVoltage, readings.batteryPercent);
     Serial.println(ok ? "Upload ok" : "Upload failed");
     return ok;
   } else {
@@ -1801,9 +1996,12 @@ bool performManualSample(bool uploadRequested) {
     return false;
   }
 
+  enableSensePower();
+
   if (!gBmeInitialized) {
     waitForSensorPowerRail();
     if (!initBME()) {
+      disableSensePower();
       Serial.println("Manual sample aborted: BME680 is unavailable.");
       return false;
     }
@@ -1811,6 +2009,7 @@ bool performManualSample(bool uploadRequested) {
 
   SensorReadings reading;
   if (!takeReading(reading)) {
+    disableSensePower();
     gBmeInitialized = false;
     Serial.println("Manual sample failed: sensor did not return a valid reading.");
     return false;
@@ -1818,6 +2017,7 @@ bool performManualSample(bool uploadRequested) {
 
   const SensorReadings* lastKnownGood = hasLastGoodReading() ? &gLastGood : nullptr;
   if (!plausible(reading, lastKnownGood)) {
+    disableSensePower();
     Serial.printf("Manual sample rejected as implausible: T=%.2fC RH=%.1f%% P=%.1fhPa\n",
                   reading.temperature,
                   reading.humidity,
@@ -1832,15 +2032,18 @@ bool performManualSample(bool uploadRequested) {
                 reading.pressure);
 
   if (!uploadRequested) {
+    disableSensePower();
     return true;
   }
 
   if (!gNetworkAvailable && !connectWiFi()) {
+    disableSensePower();
     Serial.println("Manual upload skipped: WiFi unavailable.");
     return false;
   }
 
   bool uploadOk = postReadings(reading);
+  disableSensePower();
   Serial.println(uploadOk ? "Manual upload ok." : "Manual upload failed.");
   return uploadOk;
 }
@@ -1867,6 +2070,7 @@ void runNormalModeStartupSequence() {
   setAwakeLed(true);
 
   if (!gBmeInitialized) {
+    enableSensePower();
     waitForSensorPowerRail();
     if (!initBME()) {
       if (!gNetworkAvailable && WiFi.status() != WL_CONNECTED) {
@@ -1888,6 +2092,7 @@ void runNormalModeStartupSequence() {
       Serial.println(DEEP_SLEEP_ENABLED ? "BME680 init failed; sleeping until the next interval."
                                         : "BME680 init failed; staying awake for debug/monitoring.");
       recordStartupError("BME init failed");
+      gLastSampleRunMs = millis();
       enterDeepSleep();
       return;
     }
@@ -1946,12 +2151,35 @@ void runSamplingCycle() {
   setAwakeLed(true);
   ensureSessionId();
 
+  enableSensePower();
+
+  if (!gBmeInitialized) {
+    waitForSensorPowerRail();
+    if (!initBME()) {
+      disableSensePower();
+      Serial.println("Skipping sample cycle: BME680 unavailable.");
+      gLastSampleRunMs = millis();
+      sendDebugDiscordMessage(nullptr, false, cycleStartedAt);
+      return;
+    }
+  }
+
+  float rawBatV   = readBatteryVoltage();
+  float rawBatPct = batteryVoltageToPercent(rawBatV);
+  Serial.printf("Battery: %.2fV (%.0f%%)\n", rawBatV, rawBatPct);
+
   SensorReadings r;
   const SensorReadings* lastKnownGood = hasLastGoodReading() ? &gLastGood : nullptr;
   bool ok = tryTakePlausibleReading(r, lastKnownGood);
   if (!ok) {
     ok = attemptRecoverySequence(r, lastKnownGood);
   }
+
+  r.batteryVoltage = rawBatV;
+  r.batteryPercent = rawBatPct;
+
+  // Sensor reads complete — cut BJT power before WiFi phase
+  disableSensePower();
 
   if (!gNetworkAvailable && WiFi.status() != WL_CONNECTED) {
     bool wifiOk = connectWiFi();
@@ -1971,7 +2199,9 @@ void runSamplingCycle() {
 
   if (ok) {
     gLastGood = r;
-    Serial.printf("GOOD: T=%.2f°C RH=%.1f%% P=%.1f hPa\n", r.temperature, r.humidity, r.pressure);
+    Serial.printf("GOOD: T=%.2f°C RH=%.1f%% P=%.1f hPa  VBAT=%.2fV (%.0f%%)\n",
+                  r.temperature, r.humidity, r.pressure,
+                  r.batteryVoltage, r.batteryPercent);
 
     bool uploadOk = false;
     if (gNetworkAvailable) {
@@ -1985,6 +2215,8 @@ void runSamplingCycle() {
         recordStartupError("WiFi unavailable during initial upload");
       }
     }
+
+    maybeHandleBatteryAlerts(r);
 
     if (gInErrorState) {
       gInErrorState = false;
@@ -2008,6 +2240,7 @@ void setup() {
   gRuntimeMode = RuntimeMode::Normal;
   gSampleIntervalSeconds = loadSampleIntervalSeconds();
   initStatusLed();
+  initSensePower();   // BJT low before any sensor activity
   setAwakeLed(true);
 
   Serial.printf("\nBooting (%s)...\n", bootModeName(gBootMode));
