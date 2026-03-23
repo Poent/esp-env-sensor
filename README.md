@@ -100,13 +100,13 @@ The dashboard queries `public.readings` for temperature, humidity, and pressure 
 
 ## Firmware Architecture
 
-- `src/main.cpp` supports two operating modes. Production mode defaults to a 10-minute sample/upload cadence, while debug mode defaults to 60 seconds and can send a Discord heartbeat on every cycle.
-- The firmware can either deep-sleep between cycles or stay awake and run the cadence from `loop()`. When the board is awake, the built-in LED stays on.
-- Event logging helpers stream operational telemetry (startup, implausible readings, recovery attempts) to the Supabase `device_events` table. This allows for observability when recovering from I²C or sensor errors.
-- Recovery flows perform plausibility checks, attempt soft resets, and reinitialize the sensor if measurements fall outside acceptable ranges.
+- `src/main.cpp` is now a thin bootstrap. Runtime orchestration lives in `src/runtime.cpp`, with hardware, sensor, Wi-Fi, telemetry, and serial-console logic split into dedicated modules.
+- The firmware is organized around two layers: a primary low-power sensing path (`wake -> power sensor -> read -> upload -> sleep`) and an optional diagnostics layer (`USB service mode`, serial commands, scans, pings, debug heartbeats).
+- Shared device state is centralized in `include/app_context.h`, which holds boot/runtime mode, interval configuration, connectivity state, and retained reading/battery-alert state across deep sleep.
+- `lib/envnode_core` contains pure helper logic for interval sanitization, plausibility checks, battery alert transitions, and JSON escaping. The same code is exercised by native unit tests.
+- Event logging helpers stream operational telemetry (startup, implausible readings, recovery attempts) to the Supabase `device_events` table. Recovery flows perform plausibility checks, attempt soft resets, and reinitialize the sensor if measurements fall outside acceptable ranges.
 - Production mode stores the effective sample interval in NVS so it can be overridden at runtime and survive resets and deep-sleep cycles.
-- If the sensor is unavailable at startup while the board remains awake for diagnostics, later awake-mode cycles retry BME680 initialization instead of remaining stuck in a failed state.
-- On successful cold boot, the built-in LED blinks three times and then remains on while the board stays awake.
+- Network and reporting failures no longer force the node to stay awake. Only explicit service mode or a startup sensor/bootstrap fault can block deep sleep for diagnostics.
 
 ## Configuration and Secrets
 
@@ -125,6 +125,9 @@ Edit `include/secrets.h` with your Wi-Fi SSID/password, Supabase project URL, Su
 Runtime and network behavior can also be overridden in `include/secrets.h`:
 
 - Build the `xiao-esp32s3-debug` PlatformIO environment to enable debug cadence/notification behavior.
+- Production HTTPS requests now require a configured trust anchor. Define `SUPABASE_ROOT_CA_PEM`, `N8N_WEBHOOK_ROOT_CA_PEM`, and optionally `DEBUG_WEBHOOK_ROOT_CA_PEM` with PEM-encoded root CA certificates for the endpoints you use.
+- `ALLOW_INSECURE_HTTPS` can be set to `1` only for controlled debugging when you cannot provide CA material yet. Production builds should leave it disabled.
+- `VERBOSE_HTTP_LOGGING` enables response-body logging for webhook/debug troubleshooting. Leave it at `0` for normal operation.
 - `SAMPLE_INTERVAL_SECONDS` sets the default production interval in seconds. The shipped default is `600` (10 minutes).
 - `DEBUG_SAMPLE_INTERVAL_SECONDS` sets the default debug interval in seconds. The shipped default is `60`.
 - `LOW_BATTERY_ALERT_V` and `LOW_BATTERY_CLEAR_V` control the low-battery warning threshold and recovery hysteresis. The shipped defaults are `3.5` V and `3.65` V.
@@ -171,6 +174,7 @@ pio run -e xiao-esp32s3
 pio run -e xiao-esp32s3 -t upload
 pio run -e xiao-esp32s3-debug -t upload
 pio device monitor --baud 115200
+pio test -e native
 ```
 
 If PlatformIO cannot auto-detect your serial port, pass `--upload-port <port>` to the upload command. Example: `pio run -e xiao-esp32s3 -t upload --upload-port COM4`.
@@ -195,14 +199,15 @@ Runtime profile: production, deep sleep: enabled
 WiFi: connecting...
 WiFi: connected, IP=10.0.0.2
 BME680 ready at I2C address 0x76
-POST https://<database-path>.supabase.co/rest/v1/device_events -> 201
+POST device_events -> 201
 EVENT[startup/info]: logged
-GOOD: T=24.48°C RH=39.1% P=828.8 hPa
+GOOD: T=24.48°C RH=39.1% P=828.8 hPa  VBAT=4.01V (84%)
 Sleeping for 600 seconds...
 ```
 
 - **Cadence:** In debug mode the board defaults to a 60-second sample/upload cadence. In production mode it defaults to 10 minutes unless you override it.
 - **Awake vs sleep:** With deep sleep enabled, the device wakes, samples, uploads, and sleeps. With deep sleep disabled, it stays awake, keeps Wi-Fi warm, and runs the same cycle from `loop()`.
+- **Startup fault policy:** Wi-Fi, Supabase, or webhook failures are logged but do not trap the board awake. A startup sensor/bootstrap fault can still hold the node awake so you can inspect it over serial.
 - **USB service mode:** On non-timer boots with a computer host attached over the ESP32 USB CDC/JTAG port, the firmware enters `usb_service` mode instead of sampling automatically. In this mode it stays awake, keeps serial commands active, connects to Wi-Fi for diagnostics, sends one informational paused-readings notification, and suppresses automatic polling, automatic fault alarms, and deep sleep until the host disconnects.
 - **Wi-Fi speed:** The firmware caches the target BSSID/channel after a scan failure and can optionally use a static IP to avoid DHCP delay on future connects. Active ping tests only run when you invoke the `ping` serial command; a normal successful connect no longer waits on the diagnostic ping sequence.
 - **Cold boot behavior:** Successful cold boots log a startup event, optionally send the startup webhook, blink the built-in LED three times, and then leave the LED on while awake.
@@ -222,10 +227,12 @@ If the USB host is unplugged while the board remains powered by battery, the fir
 
 ## Testing and Troubleshooting
 
+- Run `pio test -e native` to execute host-side unit tests for the pure helper logic in `lib/envnode_core`.
 - Use `pio device monitor` to inspect serial output. Successful uploads print `GOOD` lines with sensor values and HTTP status codes for Supabase requests.
 - To validate USB service mode, boot the board from a computer USB port with the sensor intentionally unpowered or disconnected. You should see `usb_service` status output, no automatic BME init attempts, no automatic deep sleep, and one informational paused-readings notification after Wi-Fi connects.
 - To validate manual sampling in service mode, keep the board on computer USB, power the sensor path you want to test, then run `sample` or `sample upload` from the serial monitor.
 - To validate automatic resume, keep the board battery-powered, start in USB service mode from a computer, then unplug the USB host. The firmware should announce that the host detached, resume the normal sensing path, and either sleep or stay awake based on your current deep-sleep configuration.
+- To validate the new startup policy, boot once with Wi-Fi or Supabase intentionally unavailable. The device should log the failure and still return to its normal deep-sleep cadence unless the sensor/bootstrap path itself failed.
 - Seeing repeated "BME680 not found" or "implausible reading" messages usually indicates wiring or sensor issues. Verify power, SDA on pin 9, SCL on pin 10, and that you are using a BME680.
 - If the sensor is missing during a non-sleeping diagnostic session, the firmware now retries BME initialization on later awake-mode intervals. You can keep the board connected, restore sensor power or wiring, and wait for the next cycle instead of rebooting.
 - If temperature reads consistently warm, the usual cause is local self-heating from the ESP32, regulator, or stagnant air around the breakout rather than a missing Bosch library compensation step. Increase physical separation from the MCU if possible, avoid enclosing the sensor near warm components, and only then apply a small `BME_TEMPERATURE_OFFSET_C` trim if the warm bias is repeatable.

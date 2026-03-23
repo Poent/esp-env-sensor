@@ -9,6 +9,24 @@
 #define DEVICE_ID            "esp32-env-node-01"
 #define N8N_WEBHOOK_URL      "https://your-n8n-domain/webhook-url"  // N8N webhook for alerts
 
+// Production HTTPS requests now validate TLS certificates by default.
+// Define PEM-encoded root CA strings for each HTTPS endpoint you use.
+// Example:
+// #define SUPABASE_ROOT_CA_PEM R"PEM(-----BEGIN CERTIFICATE-----
+// ...
+// -----END CERTIFICATE-----
+// )PEM"
+// #define N8N_WEBHOOK_ROOT_CA_PEM R"PEM(-----BEGIN CERTIFICATE-----
+// ...
+// -----END CERTIFICATE-----
+// )PEM"
+// #define DEBUG_WEBHOOK_ROOT_CA_PEM N8N_WEBHOOK_ROOT_CA_PEM
+//
+// Only use the override below for controlled debugging when you cannot supply
+// the CA chain yet. Leave it disabled in production.
+// #define ALLOW_INSECURE_HTTPS 1
+// #define VERBOSE_HTTP_LOGGING 1
+
 // Optional Cloudflare Access service-token headers for N8N webhooks.
 // Define both values together when the N8N endpoint is protected by Access.
 // #define N8N_CF_ACCESS_CLIENT_ID     "your-cloudflare-access-client-id"
@@ -28,7 +46,9 @@
 // Debug mode is selected by building the `xiao-esp32s3-debug` environment in
 // platformio.ini. In debug mode the firmware posts a heartbeat to Discord on
 // each cycle (if DEBUG_DISCORD_WEBHOOK_URL is defined) and uses
-// DEBUG_SAMPLE_INTERVAL_SECONDS as the default cadence.
+// DEBUG_SAMPLE_INTERVAL_SECONDS as the default cadence. Debug builds also allow
+// insecure HTTPS fallback automatically, but you should still prefer CA-backed
+// validation whenever practical.
 // #define DEBUG_DISCORD_WEBHOOK_URL "https://discord.com/api/webhooks/..."
 
 // Optional static IP configuration. A DHCP reservation in UniFi keeps the same
@@ -45,7 +65,7 @@
 // Optional serial config window on non-timer boots. Set to 0 to disable.
 // Supported commands: `help`, `interval`, `interval <seconds>`, `interval default`,
 // `mode`, `status`, `scan`, `ping`, `resolve <host>`, `txpower`, `reconnect`,
-// `sample`, and `sample upload`
+// `sample`, `sample upload`, and `voltage`
 // #define SERIAL_CONFIG_WINDOW_MS 5000
 
 // Enable USB host service mode on non-timer boots when the board is attached
@@ -62,5 +82,5 @@
 // while the firmware is awake, and `loop()` schedules periodic uploads.
 // #define DISABLE_DEEP_SLEEP 1
 
-// Optional: override the default events table declared in src/main.cpp
+// Optional: override the default events table declared in src/app_config.h
 // #define SUPABASE_EVENTS_TABLE "device_events"

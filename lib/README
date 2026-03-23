@@ -1,46 +1,12 @@
+This directory holds private libraries used by the firmware.
 
-This directory is intended for project specific (private) libraries.
-PlatformIO will compile them to static libraries and link into the executable file.
+Current library:
 
-The source code of each library should be placed in a separate directory
-("lib/your_library_name/[Code]").
+- `envnode_core`
+  Pure helper logic shared by the firmware and the native unit tests. It
+  contains interval sanitization, plausibility checks, battery alert state
+  transitions, and JSON escaping helpers.
 
-For example, see the structure of the following example libraries `Foo` and `Bar`:
-
-|--lib
-|  |
-|  |--Bar
-|  |  |--docs
-|  |  |--examples
-|  |  |--src
-|  |     |- Bar.c
-|  |     |- Bar.h
-|  |  |- library.json (optional. for custom build options, etc) https://docs.platformio.org/page/librarymanager/config.html
-|  |
-|  |--Foo
-|  |  |- Foo.c
-|  |  |- Foo.h
-|  |
-|  |- README --> THIS FILE
-|
-|- platformio.ini
-|--src
-   |- main.c
-
-Example contents of `src/main.c` using Foo and Bar:
-```
-#include <Foo.h>
-#include <Bar.h>
-
-int main (void)
-{
-  ...
-}
-
-```
-
-The PlatformIO Library Dependency Finder will find automatically dependent
-libraries by scanning project source files.
-
-More information about PlatformIO Library Dependency Finder
-- https://docs.platformio.org/page/librarymanager/ldf.html
+Keeping these helpers in `lib/` lets the firmware reuse them on-device while
+also testing them with `pio test -e native` without pulling in Arduino-only
+dependencies.
