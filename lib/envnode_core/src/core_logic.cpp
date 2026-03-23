@@ -3,6 +3,7 @@
 #include "core_logic.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace envnode::core {
 
